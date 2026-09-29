@@ -554,6 +554,10 @@ if (clockStart < 0 || clockEnd < 0) {
   const allGroups = buildProcessHighlightGroups(visibleProcessHighlights(sample, Object.fromEntries(Object.keys(allOff).map((key) => [key, true]))), (path) => path.slice('/work/'.length))
   if (JSON.stringify(allGroups.map((group) => group.key)) === JSON.stringify(['edit', 'read', 'command', 'search', 'task', 'thought', 'other']) && allGroups[0].title === '编辑了 1 个文件' && allGroups[0].items.length === 1 && allGroups[0].items[0].text === 'a.ts') ok('编辑、读取、命令等按类型合并，编辑文件不重复列出')
   else bad('分类分组合并', JSON.stringify(allGroups))
+  const finishedTask = { ...actions[3], id: 'task-finished', text: '2/2 已完成', todos: actions[3].todos.map((todo) => ({ ...todo, status: 'completed' })) }
+  const latestTaskGroup = buildProcessHighlightGroups({ files: [], thoughts: [], actions: [], tasks: [actions[3], finishedTask] }, (path) => path)[0]
+  if (latestTaskGroup?.title === '任务清单更新 2 次' && latestTaskGroup.preview === '2/2 已完成' && latestTaskGroup.items.length === 1 && latestTaskGroup.items[0].action.todos.every((todo) => todo.status === 'completed')) ok('任务分组展开只显示最新快照，已完成后不残留旧状态')
+  else bad('任务分组最新状态', JSON.stringify(latestTaskGroup))
   const failedEditGroup = buildProcessHighlightGroups({ files: ['/work/a.ts'], thoughts: [], tasks: [], actions: [{ id: 'failed-edit', kind: 'edit', title: '编辑', text: '失败 · b.ts' }] }, (path) => path.slice('/work/'.length))[0]
   if (failedEditGroup.title.includes('1 次失败') && failedEditGroup.items.length === 2 && failedEditGroup.items[1].text === '失败 · b.ts') ok('同轮成功编辑和失败编辑都能看到')
   else bad('编辑失败记录', JSON.stringify(failedEditGroup))
