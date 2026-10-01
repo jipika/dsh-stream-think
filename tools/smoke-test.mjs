@@ -37,6 +37,7 @@ const REACT_STUB = {
   useEffect: () => {},
   useLayoutEffect: () => {},
   useCallback: (fn) => fn,
+  useId: () => 'smoke-instance',
   useMemo: (fn) => fn(),
   useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
   memo: (component) => component,
@@ -238,13 +239,14 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
   } else {
     bad('关闭跟随', 'Element.prototype 的滚动方法被改写')
   }
-  if (clockEntry.component.name === 'TurnProcessClockNodeView' && toolEntry.component.name === 'TypewriterFollowNodeView') {
+  if (clockEntry.component.name === 'ProcessHighlightsView' && toolEntry.component.name === 'TypewriterFollowNodeView') {
     ok('原生计时行使用专用数字动画，工具行保留流式包装')
   } else {
     bad('计时行包装', `${clockEntry.component.name} / ${toolEntry.component.name}`)
   }
   if (reactKind === 'stub') {
-    const liveRow = clockEntry.component({ node: { kind: 'turn-process', data: { turn: 7 }, location: { turn: { status: 'open' } } } })
+    let liveRow = clockEntry.component({ node: { kind: 'turn-process', data: { turn: 7 }, location: { turn: { status: 'open' } } } })
+    while (typeof liveRow?.type === 'function') liveRow = liveRow.type(liveRow.props)
     if (liveRow?.props?.['data-live-empty'] === true && cssTags.get('dsh-stream-think-turn-process-clock')?.textContent.includes('[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-clock[data-live-empty])')) ok('0.2 运行中没有记录时隐藏空白过程行')
     else bad('0.2 空白过程行', String(liveRow?.type))
   }
@@ -280,15 +282,61 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
     click('stream-think-show-thought-summary')
     click('stream-think-show-commands')
     click('stream-think-show-task-updates')
+    click('stream-think-show-goals')
     for (const id of ['stream-think-show-reads', 'stream-think-show-searches', 'stream-think-show-other-tools']) { click(id); click(id) }
     const details = JSON.parse(store.get('dsh-stream-think:settings.v1'))
-    if (details.showTaskUpdates === false && details.showEditedFiles === false && details.showThoughtSummary === false && details.showCommands === false && details.showReads === false && details.showSearches === false && details.showOtherTools === false) {
-      ok('组外七类内容可独立关闭，且可全部关闭')
+    if (details.showTaskUpdates === false && details.showGoals === false && details.showEditedFiles === false && details.showThoughtSummary === false && details.showCommands === false && details.showReads === false && details.showSearches === false && details.showOtherTools === false) {
+      ok('组外八类内容可独立关闭，且可全部关闭')
     } else bad('组外内容开关', JSON.stringify(details))
   }
 } else {
   bad('exports.apply', '缺失或不可调用')
 }
+
+/* BTW commands remain Session rows and their complete reply has no disclosure. */
+try {
+  const begin = clientSource.indexOf('function isBtwCommandNode(node) {')
+  const end = clientSource.indexOf('function wrapTurnProcessClockNodeView(', begin)
+  if (begin < 0 || end < 0) throw new Error('找不到 BTW 适配')
+  const { installBtwCommandVisibility, wrapBtwCommandNodeView } = vm.runInNewContext(
+    clientSource.slice(begin, end) + '\n; ({ installBtwCommandVisibility, wrapBtwCommandNodeView })', { react: REACT_STUB })
+  const listeners = new Set()
+  let refreshes = 0
+  const definitions = []
+  const registry = {
+    entries: () => definitions,
+    subscribe(callback) { listeners.add(callback); return () => listeners.delete(callback) },
+    refresh() { refreshes++; for (const callback of [...listeners]) callback() },
+  }
+  const original = function (context) { if (this.kind !== 'command') throw new Error('definition receiver lost'); return context.node }
+  const definition = { kind: 'command', buildViewNode: original }
+  const unbind = installBtwCommandVisibility(registry)
+  definitions.push(definition)
+  registry.refresh() // native command plugin may register after this plugin
+  const Wrapped = wrapBtwCommandNodeView('NativeCommand')
+  for (const [name, outcome] of [['运行中', null], ['多行答复', {kind: 'success', text: '第一段\n第二段\n完整第三段'}], ['错误', {kind: 'error', text: '旁问失败详情'}]]) {
+    for (const location of [{kind: 'step', turn: {status: 'open'}, step: {status: 'open'}}, {kind: 'turn', turn: {status: 'closed'}}]) {
+      const data = {commandId: 'btw-1', name: 'btw', args: '附带问题', outcome}
+      const node = {key: 'command:btw-1', kind: 'command', anchorSeq: 12, target: {seq: 12}, location, data}
+      const projected = definition.buildViewNode({node})
+      if (projected.location.kind !== 'session' || projected.key !== node.key || projected.anchorSeq !== 12 || projected.data !== data || projected.target !== node.target || node.location !== location) throw new Error(name + '投影改变了身份或仍可折叠')
+      const rendered = Wrapped({node: projected})
+      const answer = rendered.children[1]
+      if (rendered.type !== 'section' || answer.type !== 'div' || answer.children[0] !== (outcome === null ? '旁问中…' : outcome.text) || rendered.props['aria-busy'] !== (outcome === null)) throw new Error(name + '未完整显示')
+      if (outcome?.kind === 'error' && answer.props.role !== 'alert') throw new Error('错误语义丢失')
+    }
+  }
+  const other = {kind: 'command', location: {kind: 'turn'}, data: {name: 'other'}}
+  if (definition.buildViewNode({node: other}) !== other || Wrapped({node: other}).type !== 'NativeCommand') throw new Error('改变了其他命令')
+  if (definition.buildViewNode({node: null}) !== null) throw new Error('空投影未保持')
+  const wrapOnce = definition.buildViewNode
+  registry.refresh()
+  if (definition.buildViewNode !== wrapOnce || refreshes > 4) throw new Error('重复包装或刷新递归')
+  unbind()
+  if (definition.buildViewNode !== original || listeners.size !== 0) throw new Error('卸载未恢复宿主')
+  ok('BTW 运行、完成、失败与历史记录都独立于过程折叠，多行答复完整显示')
+  ok('BTW 适配支持延迟注册，保持节点身份，其他命令不变且卸载恢复')
+} catch (error) { bad('BTW 原生命令适配', error) }
 
 /* ---------------- 4a. 计时与过程组标题过渡边界 ---------------- */
 
@@ -301,8 +349,9 @@ if (clockStart < 0 || clockEnd < 0) {
   const thoughtSelectorEnd = clientSource.indexOf('function RollingThinkSummary(', thoughtSelectorStart)
   if (thoughtSelectorStart < 0 || thoughtSelectorEnd < 0) bad('思考摘要选择函数提取', '产物里找不到摘要选择函数')
   else vm.runInContext(clientSource.slice(thoughtSelectorStart, thoughtSelectorEnd), sandbox)
-  const { canAnimateClockChange, presentProcessTitle, editPathsFromToolNode, actionSummariesFromToolNode, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
-    clientSource.slice(clockStart, clockEnd) + '\n; ({ canAnimateClockChange, presentProcessTitle, editPathsFromToolNode, actionSummariesFromToolNode, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot })', sandbox)
+  vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function AnimatedReasoning({')), sandbox)
+  const { canAnimateClockChange, presentProcessTitle, editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
+    clientSource.slice(clockStart, clockEnd) + '\n; ({ canAnimateClockChange, presentProcessTitle, editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot })', sandbox)
   if (presentProcessTitle('正在分析请求 · 尝试： ```js JSON.stringify({ ctx: document.body.innerText })') === '正在分析请求 · 代码片段' && [...presentProcessTitle('正在分析请求 · ' + '很长的标题'.repeat(30))].length <= 100) ok('原生活动详情含代码时收成短标题，普通长标题限制长度')
   else bad('过程标题代码溢出', '代码块或长标题未被收短')
   const cases = [
@@ -483,9 +532,15 @@ if (clockStart < 0 || clockEnd < 0) {
   else bad('未完成调用', '泄出执行中的半截内容')
   const commandCompat = ['exec_command', 'write_stdin', 'terminal_run'].every((name) => actionSummariesFromToolNode(toolNode(result(name, JSON.stringify({ description: '检查运行结果' }))))[0]?.kind === 'command')
   const readCompat = ['read_file', 'read_text_file', 'list_dir'].every((name) => actionSummariesFromToolNode(toolNode(result(name, JSON.stringify({ path: '/work/a.ts' }))))[0]?.kind === 'read')
-  const taskCompat = ['create_goal', 'update_goal'].every((name) => actionSummariesFromToolNode(toolNode(result(name, '{}')))[0]?.kind === 'task')
-  if (commandCompat && readCompat && taskCompat) ok('DSH 0.2 命令、读取和任务工具归入对应开关')
-  else bad('DSH 0.2 工具分类', `command=${commandCompat} read=${readCompat} task=${taskCompat}`)
+  const goalCompat = ['create_goal', 'update_goal', 'get_goal'].every((name) => actionSummariesFromToolNode(toolNode(result(name, '{}')))[0]?.kind === 'goal')
+  if (commandCompat && readCompat && goalCompat) ok('DSH 0.2 命令、读取和目标工具归入对应开关')
+  else bad('DSH 0.2 工具分类', `command=${commandCompat} read=${readCompat} goal=${goalCompat}`)
+  const emptyGoal = actionSummariesFromToolNode(toolNode(result('get_goal', '{}')))[0]
+  if (emptyGoal?.text === '查看目标' && buildProcessHighlightGroups({ files: [], thoughts: [], tasks: [], actions: [emptyGoal] }, (path) => path)[0]?.items[0]?.text === '查看目标') ok('无参数目标查询显示操作语义，不泄露工具名')
+  else bad('目标查询回退文案', JSON.stringify(emptyGoal))
+  const failedGoal = actionSummariesFromToolNode(toolNode(result('get_goal', '{}', true)))[0]
+  if (buildProcessHighlightGroups({ files: [], thoughts: [], tasks: [], actions: [failedGoal] }, (path) => path)[0]?.items[0]?.text === '失败 · 查看目标') ok('失败目标操作只显示一次失败和操作名称')
+  else bad('失败目标文案', JSON.stringify(failedGoal))
   const rows = [
     {
       dataset: { chatTurn: '7', chatFlowKind: 'tool-call' },
@@ -510,7 +565,9 @@ if (clockStart < 0 || clockEnd < 0) {
         : selector === '[data-tool="todo_write"]'
           ? { querySelector: (part) => ({ textContent: part.includes('summarySuffix') ? '新增 2 · 移除 0' : '1/2 已完成 · 把内容底板升级为分区域取色' }) }
           : null,
-      querySelectorAll: () => [],
+      querySelectorAll: (selector) => selector === '[data-tool="todo_write"]'
+        ? [{ querySelector: (part) => ({ textContent: part.includes('summarySuffix') ? '新增 2 · 移除 0' : '1/2 已完成 · 把内容底板升级为分区域取色' }) }]
+        : [],
     },
     {
       dataset: { chatTurn: '8', chatFlowKind: 'tool-call' },
@@ -528,16 +585,35 @@ if (clockStart < 0 || clockEnd < 0) {
   if (highlightSelector === '[data-chat-flow-kind][data-chat-turn]' && JSON.stringify([...highlights.files]) === JSON.stringify(['/work/a.ts']) && JSON.stringify(highlights.thoughts.map((thought) => thought.summary)) === JSON.stringify(['最终结论：文件已经修好。', '接着检查颜色方案。']) && highlights.thoughts[0].content.startsWith('先检查输入') && highlights.actions.length === 3 && highlights.actions[2].kind === 'task' && highlights.actions[2].text.includes('新增 2 · 移除 0')) {
     ok('按轮次提取已完成记录，独立于原生折叠设置，重复调用不重复显示')
   } else bad('关键进展提取', JSON.stringify(highlights))
+  const secondTaskAction = { ...actions[3], id: 'todo-second', text: '2/2 已完成' }
+  const parallelTaskRow = {
+    dataset: { chatTurn: '7', chatFlowKind: 'tool-call' },
+    querySelector: (selector) => selector === '[data-stream-think-actions]' ? { dataset: { streamThinkActions: JSON.stringify([actions[3], secondTaskAction]) } } : null,
+    querySelectorAll: () => [{ querySelector: () => ({ textContent: '错误共享的原生摘要' }) }],
+  }
+  const parallelTasks = processHighlights({ querySelectorAll: () => [parallelTaskRow] }, '7').actions
+  if (parallelTasks.length === 2 && parallelTasks[0].text === actions[3].text && parallelTasks[1].text === '2/2 已完成') ok('同一工具行多个清单不共享错误摘要')
+  else bad('并行任务摘要', JSON.stringify(parallelTasks))
+  const failedRow = {
+    dataset: { chatTurn: '7', chatFlowKind: 'tool-call' },
+    querySelector: (selector) => selector === '[data-stream-think-actions]' ? { dataset: { streamThinkActions: JSON.stringify([actionSummariesFromToolNode(toolNode(result('todo_write', JSON.stringify({ todos: [{ content: '失败任务', status: 'pending' }] }), true)))[0]]) } } : null,
+    querySelectorAll: () => [{ querySelector: () => ({ textContent: '错误的原生成功摘要' }) }],
+  }
+  const failedRowActions = processHighlights({ querySelectorAll: () => [failedRow] }, '7').actions
+  if (failedRowActions.length === 1 && failedRowActions[0].failed && failedRowActions[0].text.startsWith('失败 · ')) ok('失败的清单调用保留失败标记，不被原生摘要覆盖')
+  else bad('失败清单摘要覆盖', JSON.stringify(failedRowActions))
   const shortThoughtRows = [{ dataset: { chatTurn: '7', chatFlowKind: 'assistant-step' }, querySelectorAll: () => [{ dataset: { state: 'ok' }, querySelector: () => ({ textContent: '调用。' }) }] }]
   const shortHighlights = processHighlights({ querySelectorAll: () => shortThoughtRows }, '7')
   const shortGroup = buildProcessHighlightGroups({ files: [], thoughts: shortHighlights.thoughts, tasks: [], actions: [] }, (path) => path)[0]
   if (shortHighlights.thoughts[0]?.summary === '' && shortGroup?.preview === '' && shortGroup.items[0]?.text === '第 1 段思考' && shortGroup.items[0]?.content === '调用。') ok('短思考不显示空泛摘要，原文仍在分组内可展开')
   else bad('短思考摘要回退', JSON.stringify({ shortHighlights, shortGroup }))
-  const sample = { files: ['/work/a.ts'], thoughts: [{ summary: '检查完成', content: '先检查输入\n检查完成' }], actions }
-  const allOff = { showTaskUpdates: false, showEditedFiles: false, showThoughtSummary: false, showCommands: false, showReads: false, showSearches: false, showOtherTools: false }
+  const goalAction = actionSummariesFromToolNode(toolNode(result('create_goal', JSON.stringify({ objective: '完成界面核查' }))))[0]
+  const sample = { files: ['/work/a.ts'], thoughts: [{ summary: '检查完成', content: '先检查输入\n检查完成' }], actions: [...actions, goalAction] }
+  const allOff = { showTaskUpdates: false, showGoals: false, showEditedFiles: false, showThoughtSummary: false, showCommands: false, showReads: false, showSearches: false, showOtherTools: false }
   const hidden = visibleProcessHighlights(sample, allOff)
   const choices = [
     ['showTaskUpdates', (v) => v.tasks.length === 1 && v.tasks[0].kind === 'task'],
+    ['showGoals', (v) => v.actions.length === 1 && v.actions[0].kind === 'goal'],
     ['showEditedFiles', (v) => v.files.length === 1 && v.actions.length === 1 && v.actions[0].kind === 'edit'],
     ['showThoughtSummary', (v) => v.thoughts.length === 1],
     ['showCommands', (v) => v.actions.length === 1 && v.actions[0].kind === 'command'],
@@ -549,15 +625,22 @@ if (clockStart < 0 || clockEnd < 0) {
     const visible = visibleProcessHighlights(sample, { ...allOff, [key]: true })
     const groups = buildProcessHighlightGroups(visible, (path) => path.slice('/work/'.length))
     return check(visible) && shouldShowProcessHighlights(visible) && groups.length === 1 && groups[0].items.length > 0 && groups[0].preview !== ''
-  })) ok('七类开关分别控制对话中的独立分组')
+  })) ok('八类开关分别控制对话中的独立分组')
   else bad('分类开关显示逻辑', '单类开关或分组内容未生效')
   const allGroups = buildProcessHighlightGroups(visibleProcessHighlights(sample, Object.fromEntries(Object.keys(allOff).map((key) => [key, true]))), (path) => path.slice('/work/'.length))
-  if (JSON.stringify(allGroups.map((group) => group.key)) === JSON.stringify(['edit', 'read', 'command', 'search', 'task', 'thought', 'other']) && allGroups[0].title === '编辑了 1 个文件' && allGroups[0].items.length === 1 && allGroups[0].items[0].text === 'a.ts') ok('编辑、读取、命令等按类型合并，编辑文件不重复列出')
+  if (JSON.stringify(allGroups.map((group) => group.key)) === JSON.stringify(['edit', 'read', 'command', 'search', 'task', 'goal', 'thought', 'other']) && allGroups[0].title === '编辑了 1 个文件' && allGroups[0].items.length === 1 && allGroups[0].items[0].text === 'a.ts' && allGroups[1].title === '读取与查看 1 项' && allGroups[2].title === '命令与代码执行 1 次' && allGroups[5].items[0].text === '创建目标 · 完成界面核查') ok('编辑、读取、目标等按类型合并，编辑文件不重复列出')
   else bad('分类分组合并', JSON.stringify(allGroups))
   const finishedTask = { ...actions[3], id: 'task-finished', text: '2/2 已完成', todos: actions[3].todos.map((todo) => ({ ...todo, status: 'completed' })) }
   const latestTaskGroup = buildProcessHighlightGroups({ files: [], thoughts: [], actions: [], tasks: [actions[3], finishedTask] }, (path) => path)[0]
   if (latestTaskGroup?.title === '任务清单更新 2 次' && latestTaskGroup.preview === '2/2 已完成' && latestTaskGroup.items.length === 1 && latestTaskGroup.items[0].action.todos.every((todo) => todo.status === 'completed')) ok('任务分组展开只显示最新快照，已完成后不残留旧状态')
   else bad('任务分组最新状态', JSON.stringify(latestTaskGroup))
+  const failedTask = actionSummariesFromToolNode(toolNode(result('todo_write', JSON.stringify({ todos: [{ content: '不可写入', status: 'pending' }] }), true)))[0]
+  const taskAfterFailure = buildProcessHighlightGroups({ files: [], thoughts: [], actions: [], tasks: [actions[3], failedTask] }, (path) => path)[0]
+  if (taskAfterFailure?.title === '任务清单更新 1 次 · 1 次失败' && taskAfterFailure.preview === actions[3].text && taskAfterFailure.items.length === 2 && taskAfterFailure.items[0].type === 'task' && taskAfterFailure.items[1].text.startsWith('失败 · ')) ok('失败的任务调用不冒充更新，仍保留上次有效清单')
+  else bad('任务失败状态', JSON.stringify(taskAfterFailure))
+  const goalOnly = buildProcessHighlightGroups(visibleProcessHighlights({ files: [], thoughts: [], actions: [goalAction] }, { ...allOff, showGoals: true }), (path) => path)
+  if (goalOnly.length === 1 && goalOnly[0].key === 'goal' && goalOnly[0].items[0].text === '创建目标 · 完成界面核查') ok('目标操作独立于任务清单')
+  else bad('目标与清单语义', JSON.stringify(goalOnly))
   const failedEditGroup = buildProcessHighlightGroups({ files: ['/work/a.ts'], thoughts: [], tasks: [], actions: [{ id: 'failed-edit', kind: 'edit', title: '编辑', text: '失败 · b.ts' }] }, (path) => path.slice('/work/'.length))[0]
   if (failedEditGroup.title.includes('1 次失败') && failedEditGroup.items.length === 2 && failedEditGroup.items[1].text === '失败 · b.ts') ok('同轮成功编辑和失败编辑都能看到')
   else bad('编辑失败记录', JSON.stringify(failedEditGroup))
@@ -577,6 +660,7 @@ if (clockStart < 0 || clockEnd < 0) {
     disconnect() {}
   }
   const fakeReact = {
+    useId: () => 'test-instance',
     createElement(type, props, ...children) {
       if (props?.className === 'dsh-stream-think-clock') props.ref.current = rootElement
       return { type, props, children }
@@ -584,15 +668,21 @@ if (clockStart < 0 || clockEnd < 0) {
     useRef(value) { const i = hookCursor++; if (!(i in hookSlots)) hookSlots[i] = { current: value }; return hookSlots[i] },
     useState(value) { const i = hookCursor++; if (!(i in hookSlots)) hookSlots[i] = value; return [hookSlots[i], (next) => { hookSlots[i] = typeof next === 'function' ? next(hookSlots[i]) : next }] },
     useLayoutEffect(effect) { layoutEffects.push(effect) },
+    useMemo: (fn) => fn(),
     useSyncExternalStore: (_subscribe, get) => get(),
   }
   const wrapTurnProcessClockNodeView = vm.runInNewContext(
     clientSource.slice(clockEnd, wrapperEnd) + '\n; wrapTurnProcessClockNodeView',
-    { react: fakeReact, getThinkSettings: () => selectedSettings, subscribeThinkSettings() {}, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, clockLabelParts: () => [], canAnimateClockChange: () => false, MutationObserver: HighlightObserver, requestAnimationFrame: (callback) => { pendingFrames.push(callback); return pendingFrames.length }, cancelAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {} },
+    { react: fakeReact, getThinkSettings: () => selectedSettings, subscribeThinkSettings() {}, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, clockLabelParts: () => [], canAnimateClockChange: () => false, MutationObserver: HighlightObserver, requestAnimationFrame: (callback) => { pendingFrames.push(callback); return pendingFrames.length }, cancelAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {} },
   )
   const TurnProcess = wrapTurnProcessClockNodeView(() => null)
   const props = { node: { data: { turn: 7 }, location: { turn: { status: 'closed' } } }, turnProcess: { open: false } }
-  const renderPinned = (nextProps = props) => { hookCursor = 0; layoutEffects = []; return TurnProcess(nextProps) }
+  const renderPinned = (nextProps = props) => {
+    hookCursor = 0; layoutEffects = []
+    let tree = TurnProcess(nextProps)
+    while (typeof tree?.type === 'function') tree = tree.type(tree.props)
+    return tree
+  }
   const findClass = (tree, className) => {
     if (Array.isArray(tree)) return tree.map((part) => findClass(part, className)).find(Boolean)
     if (tree?.props?.className === className) return tree
@@ -613,7 +703,7 @@ if (clockStart < 0 || clockEnd < 0) {
   const opened = findKind(renderPinned({ ...props, turnProcess: { open: true } }), 'task')
   const taskHeader = findClass(pinnedTask, 'dsh-stream-think-highlight-header')
   const taskPreview = findClass(pinnedTask, 'dsh-stream-think-highlight-preview')
-  if (pinnedTask && !turnedOff && opened && taskHeader?.props?.['aria-expanded'] === false && taskPreview?.children?.[0]?.includes('新增 2 · 移除 0') && !findClass(pinnedTask, 'dsh-stream-think-highlight-text')) ok('任务分组直接显示在对话里，原过程组展开也保留，明细按需挂载')
+  if (pinnedTask && !turnedOff && opened && taskHeader?.props?.['aria-expanded'] === false && taskHeader?.props?.['aria-controls'] === 'dsh-stream-think-test-instance-task' && taskPreview?.children?.[0]?.includes('新增 2 · 移除 0') && !findClass(pinnedTask, 'dsh-stream-think-highlight-text')) ok('任务分组直接显示在对话里，原过程组展开也保留，明细按需挂载')
   else bad('任务清单分组渲染', `pinned=${!!pinnedTask} off=${!!turnedOff} open=${!!opened} preview=${String(taskPreview?.children?.[0])}`)
   taskHeader?.props?.onClick()
   const expandedTask = findKind(renderPinned(), 'task')
@@ -652,6 +742,29 @@ if (clockStart < 0 || clockEnd < 0) {
   liveObserver?.callback([{ type: 'childList', addedNodes: [addedGroup('7')] }])
   if (liveObserver && ignoredOtherTurn && pendingFrames.length === 1) ok('新过程组触发刷新，其他轮次变化不重算')
   else bad('过程组动态观察', `observer=${!!liveObserver} ignored=${ignoredOtherTurn} frames=${pendingFrames.length}`)
+  hookSlots.length = 0
+  const observedBefore = observedScopes.length
+  const requestedTurns = []
+  let taskSnapshot = [{ root: { ...result('todo_write', JSON.stringify({ todos: [{ content: '核对最后状态', status: 'pending' }] })), callId: 'native-task' } }]
+  let stepSnapshot = [{ status: 'running', blocks: [{ kind: 'reasoning', text: '正在检查实际会话切换的滚动位置。' }, { kind: 'tool-call' }] }]
+  const nativeStore = { turnDataSource(turn, kind) {
+    requestedTurns.push(turn)
+    return { subscribe: () => () => {}, getSnapshot: () => kind === 'tool-call' ? taskSnapshot : stepSnapshot }
+  } }
+  const nativeProps = { ...liveProps, useChat: (select) => select({ nodes: nativeStore }) }
+  const nativeFirst = renderPinned(nativeProps)
+  layoutEffects[1]()
+  if (findKind(nativeFirst, 'task') && !findKind(nativeFirst, 'thought') && observedScopes.length === observedBefore && requestedTurns.every((turn) => turn === 7)) ok('0.2 首次提交已有分类，无需等待工具 DOM；订阅仅限当前轮')
+  else bad('原生数据首次渲染', `task=${!!findKind(nativeFirst, 'task')} thought=${!!findKind(nativeFirst, 'thought')} observers=${observedScopes.length-observedBefore}`)
+  taskSnapshot = [{ root: { ...result('todo_write', JSON.stringify({ todos: [{ content: '核对最后状态', status: 'completed' }] })), callId: 'native-task' } }]
+  stepSnapshot = [{ status: 'settled', blocks: stepSnapshot[0].blocks }]
+  findClass(findKind(renderPinned(nativeProps), 'task'), 'dsh-stream-think-highlight-header')?.props?.onClick()
+  const nativeUpdated = renderPinned(nativeProps)
+  if (findKind(nativeUpdated, 'thought') && findAllClass(findKind(nativeUpdated, 'task'), 'dsh-stream-think-task-item')[0]?.props?.['data-status'] === 'completed') ok('原生数据结算后思考和最新任务状态即时更新')
+  else bad('原生数据状态刷新', '仍显示运行中思考或旧任务状态')
+  const duplicateData = { root: { ...result('read_file', JSON.stringify({ path: '/work/a.ts' })), callId: 'shared-call' } }
+  if (toolDataHighlights([duplicateData, duplicateData]).actions.length === 1 && thoughtDataHighlights([{ status: 'running', blocks: [{ kind: 'reasoning', text: '先核对已经修改的文件。' }, { kind: 'reasoning', text: '现在继续检查其它内容。' }] }]).length === 1) ok('原生分类合并重复调用，运行中只收录已结束思考')
+  else bad('原生数据去重与思考状态', '出现重复或半截思考')
   if (clientSource.includes('padding-bottom:16px;scroll-padding-bottom:16px') && clientSource.includes('lastRunningForScrollRef') && clientSource.includes('mask-image:none;scrollbar-gutter:auto')) {
     ok('Think 预览补足底部空间，并去除展开时的外层滚动截断')
   } else bad('Think 底部修复', '产物缺少底部空间或外层滚动规则')

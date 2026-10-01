@@ -92,7 +92,7 @@ const IS_REASONING_LIVE = [
   '',
 ].join('\n')
 
-/** Think 摘要只摘最近的实质性句子；切到新句时翻页，流式添字不反复重播。 */
+/** Think 摘录只选最近的实质性句子；切到新句时翻页，流式添字不反复重播。 */
 const ROLLING_THINK_SUMMARY = String.raw`
 		function selectThoughtSummary(text) {
 			const limit = Math.max(0, text.length - 8192);
@@ -220,6 +220,7 @@ const FOLLOW_HANDOFF = String.raw`
 const FOLLOW_SESSION_ISOLATION = String.raw`
 		const followSessionOwners = new WeakMap();
 		const followSessionActivations = new WeakMap();
+		const followSessionEntryRows = new WeakSet();
 		function followSessionOf(element) {
 			return element?.closest("[data-conversation-session]")?.getAttribute("data-conversation-session") ?? null;
 		}
@@ -244,12 +245,14 @@ const FOLLOW_SESSION_ISOLATION = String.raw`
 				followSlackTransition.delete(port);
 				followActivityAt.delete(port);
 				debugRuntime.reportFollow(port, null);
-				const activation = {};
-				followSessionActivations.set(port, activation);
-				queueMicrotask(() => {
-					if (followSessionActivations.get(port) === activation) followSessionActivations.delete(port);
-				});
 			}
+			// Initial committed rows are restored history, even if their Turn remains open.
+			for (const row of port.querySelectorAll?.("[data-chat-flow-key]") ?? []) followSessionEntryRows.add(row);
+			const activation = {};
+			followSessionActivations.set(port, activation);
+			queueMicrotask(() => {
+				if (followSessionActivations.get(port) === activation) followSessionActivations.delete(port);
+			});
 			followSessionOwners.set(port, session);
 		}
 `
@@ -274,10 +277,12 @@ const TURN_PROCESS_CLOCK = String.raw`
 			".dsh-stream-think-clock-old{position:absolute;top:0;left:0;animation:dsh-stream-think-clock-out .22s cubic-bezier(.2,.8,.2,1) both}",
 			".dsh-stream-think-highlights{display:flex;flex-direction:column;gap:2px;padding:8px 0 0;min-width:0;color:var(--dsw-alias-label-secondary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}",
 			".dsh-stream-think-clock:has(button[data-turn-process]) > .dsh-stream-think-highlights{padding-top:4px}",
-			"[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-highlights) + [data-step-process]{margin-top:4px!important}",
+			"[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-highlights) + [data-step-process]:not([hidden]){margin-top:4px!important}",
 			"[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-highlights) + [data-step-process] + [data-chat-running]{--dsh-chat-flow-gap:4px}",
-			"[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-highlights) + [data-step-process] + [data-chat-running] > .QEbr4q_runningDivider{margin:4px 0}",
 			".dsh-stream-think-highlight-group{min-width:0}",
+			".dsh-stream-think-btw{min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}",
+			".dsh-stream-think-btw-question{color:var(--dsw-alias-label-secondary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}",
+			".dsh-stream-think-btw-answer{margin-top:6px;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size-primary,14px);line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}",
 			".dsh-stream-think-highlight-header{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;min-width:0;min-height:28px;padding:3px 0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}",
 			".dsh-stream-think-highlight-title{flex:none;font-weight:500;color:var(--dsw-alias-label-secondary)}",
 			".dsh-stream-think-highlight-preview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary)}",
@@ -312,7 +317,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 			"[data-step-process-content] > [data-chat-flow-kind]{--dsh-chat-flow-gap:8px!important}",
 			"[data-step-process]:has([data-variant=think]) + [data-chat-group-part=response]{--dsh-chat-flow-gap:8px!important}",
 			"[data-step-process]:has([data-variant=think]) + [data-chat-group-part=response] + :is([data-step-process],[data-chat-flow-kind=tool-call],[data-chat-flow-kind=assistant-step],[data-chat-running]){--dsh-chat-flow-gap:8px!important}",
-			"[data-variant=think] .I17U7q_thinkBody[data-think-cap]{padding-top:8px;padding-bottom:8px;scroll-padding-bottom:8px}",
+			"[data-variant=think] [data-disclosure-content]:not([data-collapsed]) > .I17U7q_thinkBody{padding-top:8px;padding-bottom:8px;scroll-padding-bottom:8px}",
 			"[data-step-process-body]:has([data-variant=think] [data-disclosure-content]:not([data-collapsed])){max-height:none;overflow:visible;mask-image:none;scrollbar-gutter:auto}",
 			".dsh-stream-think-summary{position:relative;display:block;flex:auto;min-width:0;height:24px;overflow:hidden;white-space:nowrap}",
 			".dsh-stream-think-summary-current{display:block;width:max-content;min-width:100%;height:24px;line-height:24px;white-space:nowrap}",
@@ -596,12 +601,12 @@ const TURN_PROCESS_CLOCK = String.raw`
 				if (block === null || typeof block !== "object" || depth > 16) return;
 				if (block.kind === "tool-result") {
 					const name = block.call?.name;
-					const kind = ["todo_write", "create_goal", "update_goal", "get_goal"].includes(name) ? "task" : ["bash", "pwsh", "run_code", "exec_command", "write_stdin"].includes(name) || name?.startsWith("terminal_") ? "command" : ["read", "read_file", "read_text_file", "read_image", "view_image", "list_dir", "list_directory", "web_fetch"].includes(name) ? "read" : ["web_search", "file_search", "search_files", "grep", "glob"].includes(name) || name?.endsWith("_inspect") ? "search" : ["edit", "write", "apply_patch", "str_replace_editor"].includes(name) ? "edit" : "other";
+					const kind = name === "todo_write" ? "task" : ["create_goal", "update_goal", "get_goal"].includes(name) ? "goal" : ["bash", "pwsh", "run_code", "exec_command", "write_stdin"].includes(name) || name?.startsWith("terminal_") ? "command" : ["read", "read_file", "read_text_file", "read_image", "view_image", "list_dir", "list_directory", "web_fetch"].includes(name) ? "read" : ["web_search", "file_search", "search_files", "grep", "glob"].includes(name) || name?.endsWith("_inspect") ? "search" : ["edit", "write", "apply_patch", "str_replace_editor"].includes(name) ? "edit" : "other";
 					{
 						let args = {};
 						try { args = JSON.parse(block.call?.argsRaw ?? "{}"); } catch { /* Partial arguments: use tool name. */ }
 						if (args === null || typeof args !== "object") args = {};
-						const title = kind === "task" ? "任务清单" : kind === "command" ? "命令" : kind === "search" ? "搜索" : kind === "read" ? "读取" : kind === "edit" ? "编辑" : String(name ?? "工具");
+						const title = kind === "task" ? "任务清单" : kind === "goal" ? name === "create_goal" ? "创建目标" : name === "update_goal" ? "更新目标" : "查看目标" : kind === "command" ? "命令" : kind === "search" ? "搜索" : kind === "read" ? "读取" : kind === "edit" ? "编辑" : String(name ?? "工具");
 						let text;
 						let todos = null;
 						if (name === "todo_write" && Array.isArray(args.todos)) {
@@ -621,18 +626,62 @@ const TURN_PROCESS_CLOCK = String.raw`
 							const active = todos.find((item) => item.status === "in_progress") ?? todos.find((item) => item.status === "pending");
 							text = done + "/" + todos.length + " 已完成" + (active ? " · " + active.content.replace(/\s+/g, " ").trim() : "");
 						} else {
-							const candidates = kind === "command" ? [args.description, args.command, name === "run_code" ? "运行代码" : name] : [args.description, args.path, args.file_path, args.query, args.pattern, args.url, args.queries?.[0], name];
+							const candidates = kind === "command" ? [args.description, args.command, name === "run_code" ? "运行代码" : name] : kind === "goal" ? [args.objective, args.description, args.title, args.name, args.goal_id, args.goalId, args.id, title] : [args.description, args.path, args.file_path, args.query, args.pattern, args.url, args.queries?.[0], name];
 							const raw = candidates.find((value) => typeof value === "string" && value.trim() !== "") ?? String(name);
 							const normalized = raw.replace(/\s+/g, " ").trim();
 							text = [...normalized].length > 120 ? [...normalized].slice(0, 119).join("") + "…" : normalized;
 						}
-						actions.push({ id: String(block.callId ?? ""), kind, title, text: (block.isError ? "失败 · " : "") + text, ...!block.isError && todos !== null ? { todos } : {} });
+						actions.push({ id: String(block.callId ?? ""), kind, title, failed: block.isError === true, text: (block.isError ? "失败 · " : "") + text, ...!block.isError && todos !== null ? { todos } : {} });
 					}
 				}
 				if (Array.isArray(block.subCalls)) for (const child of block.subCalls) visit(child, depth + 1);
 			};
 			visit(node.data?.root, 0);
 			return actions;
+		}
+		const EMPTY_PROCESS_DATA = [];
+		const EMPTY_PROCESS_SOURCE = { subscribe: () => () => {}, getSnapshot: () => EMPTY_PROCESS_DATA };
+		const processToolCache = new WeakMap();
+		const processThoughtCache = new WeakMap();
+		function toolDataHighlights(records) {
+			const files = new Set();
+			const actions = [];
+			const seen = new Set();
+			for (const data of records) {
+				if (data === null || typeof data !== "object") continue;
+				let entry = processToolCache.get(data);
+				if (entry === void 0) {
+					const node = { kind: "tool-call", data };
+					entry = { files: editPathsFromToolNode(node), actions: actionSummariesFromToolNode(node) };
+					processToolCache.set(data, entry);
+				}
+				for (const path of entry.files) files.add(path);
+				for (const action of entry.actions) {
+					if (action.id !== "" && seen.has(action.id)) continue;
+					if (action.id !== "") seen.add(action.id);
+					actions.push(action);
+				}
+			}
+			return { files: [...files], actions };
+		}
+		function thoughtDataHighlights(records) {
+			const thoughts = [];
+			for (const data of records) {
+				if (data === null || typeof data !== "object") continue;
+				let entry = processThoughtCache.get(data);
+				if (entry === void 0) {
+					entry = [];
+					const blocks = data.blocks ?? [];
+					for (let index = 0; index < blocks.length; index++) {
+						const block = blocks[index];
+						if (block?.kind !== "reasoning" || data.status === "running" && isReasoningLive(blocks, index)) continue;
+						if (typeof block.text === "string" && block.text.trim() !== "") entry.push({ summary: selectThoughtSummary(block.text).text, content: block.text });
+					}
+					processThoughtCache.set(data, entry);
+				}
+				thoughts.push(...entry);
+			}
+			return thoughts;
 		}
 		function processHighlights(scope, turn) {
 			const files = new Set();
@@ -651,14 +700,16 @@ const TURN_PROCESS_CLOCK = String.raw`
 					if (actionHolder !== null) {
 						try {
 							const rowActions = JSON.parse(actionHolder.dataset.streamThinkActions);
+							const taskCount = rowActions.filter((action) => action?.kind === "task").length;
+							const taskTools = taskCount === 1 ? row.querySelectorAll('[data-tool="todo_write"]') : [];
 							for (const action of rowActions) {
 								if (action === null || typeof action !== "object" || typeof action.kind !== "string" || typeof action.text !== "string") continue;
 								if (typeof action.id === "string" && action.id !== "") {
 									if (seenActionIds.has(action.id)) continue;
 									seenActionIds.add(action.id);
 								}
-								if (action.kind !== "task") { actions.push(action); continue; }
-								const tool = row.querySelector('[data-tool="todo_write"]');
+								if (action.kind !== "task" || action.failed) { actions.push(action); continue; }
+								const tool = taskTools.length === 1 ? taskTools[0] : null;
 								const summary = tool?.querySelector('[class*="_summary"]:not([class*="_summarySuffix"])')?.textContent?.trim() ?? "";
 								const suffix = tool?.querySelector('[class*="_summarySuffix"]')?.textContent?.trim() ?? "";
 								actions.push(summary === "" ? action : { ...action, text: summary + (suffix === "" ? "" : " · " + suffix) });
@@ -670,7 +721,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 					for (const box of row.querySelectorAll("[data-variant=think]")) {
 						if (box.dataset.state === "running") continue;
 						const raw = box.querySelector("[data-disclosure-content]")?.textContent ?? "";
-							if (raw.trim() !== "") thoughts.push({ summary: selectThoughtSummary(raw).text, content: raw });
+						if (raw.trim() !== "") thoughts.push({ summary: selectThoughtSummary(raw).text, content: raw });
 					}
 				}
 			}
@@ -681,7 +732,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 				files: settings.showEditedFiles ? highlights.files : [],
 				thoughts: settings.showThoughtSummary ? highlights.thoughts : [],
 				tasks: settings.showTaskUpdates ? highlights.actions.filter((action) => action.kind === "task") : [],
-				actions: highlights.actions.filter((action) => action.kind === "edit" ? settings.showEditedFiles : action.kind === "command" ? settings.showCommands : action.kind === "read" ? settings.showReads : action.kind === "search" ? settings.showSearches : action.kind === "other" && settings.showOtherTools)
+				actions: highlights.actions.filter((action) => action.kind === "edit" ? settings.showEditedFiles : action.kind === "goal" ? settings.showGoals : action.kind === "command" ? settings.showCommands : action.kind === "read" ? settings.showReads : action.kind === "search" ? settings.showSearches : action.kind === "other" && settings.showOtherTools)
 			};
 		}
 		function briefProcessText(text) {
@@ -691,7 +742,12 @@ const TURN_PROCESS_CLOCK = String.raw`
 		function buildProcessHighlightGroups(visible, fileLabel) {
 			const groups = [];
 			const actionsOf = (kind) => visible.actions.filter((action) => action.kind === kind);
-			const actionItems = (actions) => actions.map((action) => ({ type: action.kind === "task" && Array.isArray(action.todos) ? "task" : "action", text: action.kind === "other" ? action.title + " · " + action.text : action.text, action }));
+			const actionItems = (actions) => actions.map((action) => {
+				const failed = action.failed && action.text.startsWith("失败 · ");
+				const detail = failed ? action.text.slice(5) : action.text;
+				const labeled = ["other", "goal"].includes(action.kind) ? (failed ? "失败 · " : "") + action.title + (detail === action.title ? "" : " · " + detail) : action.text;
+				return { type: action.kind === "task" && Array.isArray(action.todos) ? "task" : "action", text: labeled, action };
+			});
 			const add = (key, title, items, preview) => {
 				if (items.length > 0) groups.push({ key, title, preview: briefProcessText(preview), items });
 			};
@@ -701,15 +757,21 @@ const TURN_PROCESS_CLOCK = String.raw`
 			const editTitle = files.length > 0 ? "编辑了 " + files.length + " 个文件" + (failedEdits.length > 0 ? " · " + failedEdits.length + " 次失败" : "") : "文件编辑 " + editActions.length + " 次";
 			add("edit", editTitle, files.length > 0 ? [...files, ...actionItems(failedEdits)] : actionItems(editActions), files.length > 0 ? files.slice(-2).map((item) => item.text).join("、") : editActions.at(-1)?.text ?? "");
 			const reads = actionsOf("read");
-			add("read", "读取了 " + reads.length + " 项", actionItems(reads), reads.at(-1)?.text ?? "");
+			add("read", "读取与查看 " + reads.length + " 项", actionItems(reads), reads.at(-1)?.text ?? "");
 			const commands = actionsOf("command");
-			add("command", "运行了 " + commands.length + " 条命令", actionItems(commands), commands.at(-1)?.text ?? "");
+			add("command", "命令与代码执行 " + commands.length + " 次", actionItems(commands), commands.at(-1)?.text ?? "");
 			const searches = actionsOf("search");
 			add("search", "搜索了 " + searches.length + " 次", actionItems(searches), searches.at(-1)?.text ?? "");
-			const currentTask = visible.tasks.findLast((action) => Array.isArray(action.todos)) ?? visible.tasks.at(-1);
-			add("task", "任务清单更新 " + visible.tasks.length + " 次", currentTask === void 0 ? [] : actionItems([currentTask]), currentTask?.text ?? "");
+			const snapshots = visible.tasks.filter((action) => Array.isArray(action.todos));
+			const withoutSnapshot = visible.tasks.filter((action) => !Array.isArray(action.todos));
+			const failedTasks = withoutSnapshot.filter((action) => action.failed).length;
+			const currentTask = snapshots.at(-1);
+			const taskTitle = (snapshots.length > 0 ? "任务清单更新 " + snapshots.length + " 次" : "任务清单调用 " + visible.tasks.length + " 次") + (failedTasks > 0 ? " · " + failedTasks + " 次失败" : "") + (withoutSnapshot.length > failedTasks ? " · " + (withoutSnapshot.length - failedTasks) + " 次无有效清单" : "");
+			add("task", taskTitle, actionItems(currentTask === void 0 ? withoutSnapshot : [currentTask, ...withoutSnapshot]), currentTask?.text ?? withoutSnapshot.at(-1)?.text ?? "");
+			const goals = actionsOf("goal");
+			add("goal", "目标操作 " + goals.length + " 次", actionItems(goals), goals.at(-1)?.text ?? "");
 			const thoughts = visible.thoughts.map((thought, index) => ({ type: "thought", text: thought.summary || "第 " + (index + 1) + " 段思考", content: thought.content }));
-			add("thought", "思考摘要 " + thoughts.length + " 段", thoughts, visible.thoughts.findLast((thought) => thought.summary !== "")?.summary ?? "");
+			add("thought", "思考摘录 " + thoughts.length + " 段", thoughts, visible.thoughts.findLast((thought) => thought.summary !== "")?.summary ?? "");
 			const others = actionsOf("other");
 			add("other", "其他工具 " + others.length + " 项", actionItems(others), others.at(-1)?.text ?? "");
 			return groups;
@@ -721,16 +783,70 @@ const TURN_PROCESS_CLOCK = String.raw`
 			if (first === void 0 || second === void 0) return first === second;
 			return first.length === second.length && first.every((todo, index) => todo.content === second[index].content && todo.status === second[index].status);
 		}
+		function isBtwCommandNode(node) {
+			return node?.kind === "command" && node.data?.name === "btw";
+		}
+		/* Side questions belong to the Session, outside both Turn and Step disclosures. */
+		function installBtwCommandVisibility(registry) {
+			if (typeof registry?.entries !== "function" || typeof registry.subscribe !== "function" || typeof registry.refresh !== "function") return () => {};
+			const wrapped = new WeakSet();
+			const undoBuilders = [];
+			const wrap = () => {
+				let changed = false;
+				for (const definition of registry.entries()) {
+					if (definition.kind !== "command" || typeof definition.buildViewNode !== "function" || wrapped.has(definition.buildViewNode)) continue;
+					const original = definition.buildViewNode;
+					const next = (context) => {
+						const node = original.call(definition, context);
+						return isBtwCommandNode(node) && node.location?.kind !== "session" ? { ...node, location: { kind: "session" } } : node;
+					};
+					wrapped.add(next);
+					definition.buildViewNode = next;
+					undoBuilders.push(() => { if (definition.buildViewNode === next) definition.buildViewNode = original; });
+					changed = true;
+				}
+				if (changed) registry.refresh();
+			};
+			const off = registry.subscribe(wrap);
+			wrap();
+			return () => { off(); for (const restore of undoBuilders) restore(); registry.refresh(); };
+		}
+		function wrapBtwCommandNodeView(Inner) {
+			return function BtwCommandNodeView(props) {
+				if (!isBtwCommandNode(props.node)) return (0, react.createElement)(Inner, props);
+				const command = props.node.data;
+				const outcome = command.outcome;
+				return (0, react.createElement)("section", { className: "dsh-stream-think-btw", "data-btw-command": command.commandId, "aria-label": "旁问", "aria-busy": outcome === null },
+					(0, react.createElement)("div", { className: "dsh-stream-think-btw-question" }, "/btw" + (command.args ? " · " + command.args : "")),
+					(0, react.createElement)("div", { className: "dsh-stream-think-btw-answer", role: outcome?.kind === "error" ? "alert" : void 0 }, outcome === null ? "旁问中…" : outcome.text ?? (outcome.kind === "error" ? "旁问失败" : "旁问完成")));
+			};
+		}
 		function wrapTurnProcessClockNodeView(Inner) {
-			return function TurnProcessClockNodeView(props) {
+			/* Read DSH 0.2 data before the first DOM commit, so scroll restoration sees final group heights. */
+			function NativeProcessHighlights(props) {
+				const store = props.useChat((snapshot) => snapshot.nodes);
+				const turn = props.node?.data?.turn;
+				const sources = (0, react.useMemo)(() => ({
+					tools: store?.turnDataSource?.(turn, "tool-call") ?? EMPTY_PROCESS_SOURCE,
+					thoughts: store?.turnDataSource?.(turn, "assistant-step") ?? EMPTY_PROCESS_SOURCE
+				}), [store, turn]);
+				const tools = (0, react.useSyncExternalStore)(sources.tools.subscribe, sources.tools.getSnapshot, sources.tools.getSnapshot);
+				const steps = (0, react.useSyncExternalStore)(sources.thoughts.subscribe, sources.thoughts.getSnapshot, sources.thoughts.getSnapshot);
+				const toolHighlights = (0, react.useMemo)(() => toolDataHighlights(tools), [tools]);
+				const thoughts = (0, react.useMemo)(() => thoughtDataHighlights(steps), [steps]);
+				const nativeHighlights = store?.turnDataSource === void 0 ? void 0 : { ...toolHighlights, thoughts };
+				return (0, react.createElement)(TurnProcessClockNodeView, { ...props, nativeHighlights });
+			}
+			function TurnProcessClockNodeView(props) {
 				const rootRef = (0, react.useRef)(null);
+				const highlightId = (0, react.useId)();
 				const [clock, setClock] = (0, react.useState)({ previous: "", current: "", sequence: 0 });
 				const [highlights, setHighlights] = (0, react.useState)({ files: [], thoughts: [], actions: [] });
 				const [openGroups, setOpenGroups] = (0, react.useState)({});
 				const [visitedGroups, setVisitedGroups] = (0, react.useState)({});
 				const [openThought, setOpenThought] = (0, react.useState)(null);
 				const detailSettings = (0, react.useSyncExternalStore)(subscribeThinkSettings, getThinkSettings, getThinkSettings);
-				const detailsEnabled = detailSettings.showTaskUpdates || detailSettings.showEditedFiles || detailSettings.showThoughtSummary || detailSettings.showCommands || detailSettings.showReads || detailSettings.showSearches || detailSettings.showOtherTools;
+				const detailsEnabled = detailSettings.showTaskUpdates || detailSettings.showGoals || detailSettings.showEditedFiles || detailSettings.showThoughtSummary || detailSettings.showCommands || detailSettings.showReads || detailSettings.showSearches || detailSettings.showOtherTools;
 				(0, react.useLayoutEffect)(() => {
 					const root = rootRef.current;
 					if (root === null) return;
@@ -750,7 +866,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 				const closed = props.node?.location?.turn?.status === "closed";
 				const turnId = String(props.node?.data?.turn ?? "");
 				(0, react.useLayoutEffect)(() => {
-					if (turnId === "" || !detailsEnabled) return;
+					if (props.nativeHighlights !== void 0 || turnId === "" || !detailsEnabled) return;
 					const root = rootRef.current;
 					const scope = root?.closest("[data-conversation-scroll]") ?? root?.closest("[data-chat-flow]");
 					if (scope === null || scope === void 0) return;
@@ -758,7 +874,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 					const read = () => {
 						frame = 0;
 						const next = processHighlights(scope, turnId);
-						setHighlights((old) => old.thoughts.length === next.thoughts.length && old.thoughts.every((thought, i) => thought.summary === next.thoughts[i].summary && thought.content === next.thoughts[i].content) && old.files.length === next.files.length && old.files.every((file, i) => file === next.files[i]) && old.actions.length === next.actions.length && old.actions.every((action, i) => action.id === next.actions[i].id && action.kind === next.actions[i].kind && action.title === next.actions[i].title && action.text === next.actions[i].text && sameTaskSnapshot(action.todos, next.actions[i].todos)) ? old : next);
+						setHighlights((old) => old.thoughts.length === next.thoughts.length && old.thoughts.every((thought, i) => thought.summary === next.thoughts[i].summary && thought.content === next.thoughts[i].content) && old.files.length === next.files.length && old.files.every((file, i) => file === next.files[i]) && old.actions.length === next.actions.length && old.actions.every((action, i) => action.id === next.actions[i].id && action.kind === next.actions[i].kind && action.title === next.actions[i].title && action.failed === next.actions[i].failed && action.text === next.actions[i].text && sameTaskSnapshot(action.todos, next.actions[i].todos)) ? old : next);
 					};
 					const schedule = () => { if (frame === 0) frame = requestAnimationFrame(read); };
 					read();
@@ -776,7 +892,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 					observer?.observe(scope, { childList: true, characterData: true, attributes: true, subtree: true, attributeFilter: ["data-stream-think-edit-files", "data-stream-think-actions", "data-turn-process-member", "data-state"] });
 					const stop = closed ? setTimeout(() => observer?.disconnect(), 1500) : null;
 					return () => { observer?.disconnect(); if (stop !== null) clearTimeout(stop); if (frame !== 0) cancelAnimationFrame(frame); };
-				}, [closed, turnId, detailsEnabled]);
+				}, [closed, turnId, detailsEnabled, props.nativeHighlights !== void 0]);
 				const oldParts = clockLabelParts(clock.previous);
 				const parts = clockLabelParts(clock.current);
 				const animate = canAnimateClockChange(clock.previous, clock.current);
@@ -786,7 +902,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 						(0, react.createElement)("span", { className: "dsh-stream-think-clock-old" }, oldParts[i]),
 						(0, react.createElement)("span", { className: "dsh-stream-think-clock-next" }, part));
 				});
-				const visible = visibleProcessHighlights(highlights, detailSettings);
+				const visible = visibleProcessHighlights(props.nativeHighlights ?? highlights, detailSettings);
 				const showHighlights = shouldShowProcessHighlights(visible);
 				const cwd = props.cwd ?? "";
 				const fileLabel = (path) => cwd !== "" && path.startsWith(cwd + "/") ? path.slice(cwd.length + 1) : path;
@@ -800,7 +916,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 						...groups.map((group) => {
 							const open = openGroups[group.key] === true;
 							const mounted = open || visitedGroups[group.key] === true;
-							const bodyId = "dsh-stream-think-" + turnId + "-" + group.key;
+							const bodyId = "dsh-stream-think-" + highlightId + "-" + group.key;
 							return (0, react.createElement)("div", { key: group.key, className: "dsh-stream-think-highlight-group", "data-kind": group.key },
 								(0, react.createElement)("button", { type: "button", className: "dsh-stream-think-highlight-header", "aria-expanded": open, "aria-controls": bodyId, onClick: () => toggleGroup(group.key) },
 									(0, react.createElement)("span", { className: "dsh-stream-think-highlight-title" }, group.title),
@@ -828,6 +944,9 @@ const TURN_PROCESS_CLOCK = String.raw`
 											return (0, react.createElement)("div", { key, className: "dsh-stream-think-highlight-text", "data-type": item.type, title: item.text }, item.text);
 										}))));
 						})));
+			}
+			return function ProcessHighlightsView(props) {
+				return (0, react.createElement)(typeof props.useChat === "function" ? NativeProcessHighlights : TurnProcessClockNodeView, props);
 			};
 		}
 		//#endregion
@@ -838,7 +957,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t//#region dsh-stream-think: 思考行展开设置（localStorage，不依赖 Host）',
   '\t\t/** 展开/收起/预览行数全部由本插件决定，改完立刻生效，不需要重启。 */',
   '\t\tconst THINK_SETTINGS_KEY = "dsh-stream-think:settings.v1";',
-  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, capLines: 24, showTaskUpdates: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
+  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, capLines: 24, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
   '\t\tconst THINK_CAP_VAR = "--dsh-stream-think-cap-lines";',
   '\t\tconst thinkSettingsListeners = new Set();',
   '',
@@ -852,6 +971,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\t\tif (typeof parsed.autoExpand === "boolean") out.autoExpand = parsed.autoExpand;',
   '\t\t\t\t\t\tif (typeof parsed.autoCollapse === "boolean") out.autoCollapse = parsed.autoCollapse;',
   '\t\t\t\t\t\tif (typeof parsed.showTaskUpdates === "boolean") out.showTaskUpdates = parsed.showTaskUpdates;',
+  '\t\t\t\t\t\tif (typeof parsed.showGoals === "boolean") out.showGoals = parsed.showGoals;',
   '\t\t\t\t\t\tif (typeof parsed.showEditedFiles === "boolean") out.showEditedFiles = parsed.showEditedFiles;',
   '\t\t\t\t\t\tif (typeof parsed.showThoughtSummary === "boolean") out.showThoughtSummary = parsed.showThoughtSummary;',
   '\t\t\t\t\t\tif (typeof parsed.showCommands === "boolean") out.showCommands = parsed.showCommands;',
@@ -977,15 +1097,17 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\t\t\tonClick: () => updateThinkSettings({ capLines: v })',
   '\t\t\t\t\t\t}, v === 0 ? "不限" : v + " 行")))),',
   '\t\t\t\th("div", { className: "dsh-stream-think-set-heading" }, "直接显示在对话中"),',
-  '\t\t\t\trow("showTaskUpdates", "任务清单", "显示每次已完成的任务清单更新（默认）",',
+  '\t\t\t\trow("showTaskUpdates", "任务清单", "显示最近一次有效清单及更新次数（默认）",',
   '\t\t\t\t\tswitchBtn(s.showTaskUpdates, "在对话中显示任务清单", "stream-think-show-task-updates", () => updateThinkSettings({ showTaskUpdates: !s.showTaskUpdates }))),',
+  '\t\t\t\trow("showGoals", "目标操作", "目标的创建、更新与查看，独立于任务清单（默认）",',
+  '\t\t\t\t\tswitchBtn(s.showGoals, "在对话中显示目标操作", "stream-think-show-goals", () => updateThinkSettings({ showGoals: !s.showGoals }))),',
   '\t\t\t\trow("showEditedFiles", "文件编辑", "显示本轮成功写入或编辑的所有文件（默认）",',
   '\t\t\t\t\tswitchBtn(s.showEditedFiles, "在对话中显示已修改文件", "stream-think-show-edited-files", () => updateThinkSettings({ showEditedFiles: !s.showEditedFiles }))),',
-  '\t\t\t\trow("showThoughtSummary", "思考摘要", "每段已完成思考各留一条记录；短句不冒充摘要（默认）",',
-  '\t\t\t\t\tswitchBtn(s.showThoughtSummary, "在对话中显示思考摘要", "stream-think-show-thought-summary", () => updateThinkSettings({ showThoughtSummary: !s.showThoughtSummary }))),',
+  '\t\t\t\trow("showThoughtSummary", "思考摘录", "每段已完成思考提取一句实质内容；点击查看原文（默认）",',
+  '\t\t\t\t\tswitchBtn(s.showThoughtSummary, "在对话中显示思考摘录", "stream-think-show-thought-summary", () => updateThinkSettings({ showThoughtSummary: !s.showThoughtSummary }))),',
   '\t\t\t\trow("showCommands", "命令与代码执行", "从已完成的命令提取简短描述；失败会标记（默认）",',
   '\t\t\t\t\tswitchBtn(s.showCommands, "在对话中显示命令与代码执行", "stream-think-show-commands", () => updateThinkSettings({ showCommands: !s.showCommands }))),',
-  '\t\t\t\trow("showReads", "读取文件与图片", "显示读取记录；默认关闭以减少噪音",',
+  '\t\t\t\trow("showReads", "读取与查看", "文件、图片、目录与网页内容；默认关闭以减少噪音",',
   '\t\t\t\t\tswitchBtn(s.showReads, "在对话中显示读取记录", "stream-think-show-reads", () => updateThinkSettings({ showReads: !s.showReads }))),',
   '\t\t\t\trow("showSearches", "搜索", "显示文件搜索和网页搜索；默认关闭",',
   '\t\t\t\t\tswitchBtn(s.showSearches, "在对话中显示搜索记录", "stream-think-show-searches", () => updateThinkSettings({ showSearches: !s.showSearches }))),',
@@ -1052,7 +1174,7 @@ function patchClient(source) {
   out = swap(out, 'client/process-title-start', '\t\t\tconst detachLiveRunningClock = installLiveRunningClock();', '\t\t\tconst detachLiveRunningClock = installLiveRunningClock();\n\t\t\tconst detachProcessTitleFlip = installProcessTitleFlip(readMotionPreference);')
   out = swap(out, 'client/process-title-stop', '\t\t\t\tdetachLiveRunningClock();', '\t\t\t\tdetachProcessTitleFlip();\n\t\t\t\tdetachLiveRunningClock();')
   out = swap(out, 'client/process-title-call', 'const unwrap = wrapAgentChatRows(ctx, useControlScroll);', 'const unwrap = wrapAgentChatRows(ctx, useControlScroll, () => settings.getSnapshot().motionPreference);')
-  out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : wrapFollowNodeView(inner, useControlScroll);')
+  out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : wrapFollowNodeView(key === "command" ? wrapBtwCommandNodeView(inner) : inner, useControlScroll);')
   out = swap(
     out,
     'client/mark-edited-files',
@@ -1485,6 +1607,33 @@ function patchClient(source) {
   out = swap(out, 'client/session-follow-cleanup', '\t\t\t\t\tif (host === null) return;\n\t\t\t\t\tholding = null;\n\t\t\t\t\tif (!isLeader(host)) return;', '\t\t\t\t\tif (host === null) return;\n\t\t\t\t\tholding = null;\n\t\t\t\t\tif (!isOriginalSession(host)) {\n\t\t\t\t\t\tisolateFollowSession(host, host);\n\t\t\t\t\t\treleaseRevealScale();\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tif (!isLeader(host)) return;')
   out = swap(out, 'client/session-follow-disabled-cleanup', '\t\t\t\t\t\tif (disabledHost !== null) {\n\t\t\t\t\t\t\tclearVisual(disabledHost);', '\t\t\t\t\t\tif (disabledHost !== null && !isOriginalSession(disabledHost)) isolateFollowSession(disabledHost, disabledHost);\n\t\t\t\t\t\telse if (disabledHost !== null) {\n\t\t\t\t\t\t\tclearVisual(disabledHost);')
 
+  // Returning to an already-running conversation is not a new-content entrance.
+  // A fresh reserve moves physical bottom before a single new character arrives;
+  // the mandatory trajectory lag then only partly cancels that movement.
+  // A shrinking layout clamps scrollTop automatically. Compare the last accepted
+  // position against that same new floor, as the native ChatViewport does, before
+  // deciding that a pointer/key interaction meant the reader scrolled upward.
+  out = swap(out, 'client/reader-layout-clamp',
+    '\t\tfunction readerScrolledUp(port) {\n\t\t\treturn port.scrollTop < (followScrollLedgers.get(port) ?? 0) - 8;\n\t\t}',
+    '\t\tfunction readerScrolledUp(port) {\n\t\t\tconst floor = Math.max(0, port.scrollHeight - port.clientHeight);\n\t\t\tconst previousTop = Math.min(followScrollLedgers.get(port) ?? 0, floor);\n\t\t\treturn port.scrollTop < previousTop - 8;\n\t\t}')
+  out = swap(out, 'client/resume-growth-state', '\t\t\t\tlet primed = false;', '\t\t\t\tlet primed = false;\n\t\t\t\tlet waitingForContentGrowth = false;\n\t\t\t\tlet resumedContentHeight = 0;')
+  out = swap(out, 'client/resume-no-history-entrance',
+    '\t\t\t\t\t\tconst inherited = nextPort.hasAttribute(FOLLOW_OWNED_ATTR) ? followMotionStates.get(nextPort) : void 0;',
+    '\t\t\t\t\t\tif (entrancePending && followSessionEntryRows.has(root.closest("[data-chat-flow-key]"))) finishEntrance();\n\t\t\t\t\t\tconst inherited = nextPort.hasAttribute(FOLLOW_OWNED_ATTR) ? followMotionStates.get(nextPort) : void 0;')
+  out = swap(out, 'client/resume-no-history-text-replay', '\t\t\t\tvisit(root, revealInitial);', '\t\t\t\tvisit(root, revealInitial && !followSessionEntryRows.has(root.closest("[data-chat-flow-key]")));')
+  out = swap(out, 'client/resume-no-synthetic-reserve',
+    '\t\t\t\t\t\t\treservePx = Math.max(ownedBottomSpaceOf(nextPort), predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);',
+    '\t\t\t\t\t\t\twaitingForContentGrowth = !entrancePending;\n\t\t\t\t\t\t\treservePx = Math.max(ownedBottomSpaceOf(nextPort), !waitingForContentGrowth && predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);')
+  out = swap(out, 'client/resume-native-reading-policy',
+    '\t\t\t\t\t\t\tfollowing = !readerScrolledUp(nextPort) && !followReaderHolds.has(nextPort);',
+    '\t\t\t\t\t\t\tfollowing = (root.closest("[data-chat-following-tail]") !== null || reportedLag <= 1) && !readerScrolledUp(nextPort) && !followReaderHolds.has(nextPort);\n\t\t\t\t\t\t\treaderReleased = !following;')
+  out = swap(out, 'client/resume-growth-baseline',
+    '\t\t\t\t\t\tprimed = true;\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tif (!following',
+    '\t\t\t\t\t\tresumedContentHeight = Math.max(0, nextPort.scrollHeight - runwayOffsetOf(nextPort));\n\t\t\t\t\t\tprimed = true;\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tif (!following')
+  out = swap(out, 'client/resume-wait-real-growth',
+    '\t\t\t\t\tconst predictGrowth = predictiveRef?.current ?? predictive;\n\t\t\t\t\tconst statusElement = turnStatusOf(nextPort);',
+    '\t\t\t\t\tif (waitingForContentGrowth) {\n\t\t\t\t\t\tconst naturalHeight = Math.max(0, nextPort.scrollHeight - runwayOffsetOf(nextPort));\n\t\t\t\t\t\tif (naturalHeight <= resumedContentHeight + .5) {\n\t\t\t\t\t\t\tresumedContentHeight = naturalHeight;\n\t\t\t\t\t\t\tanimatedH = naturalHeight;\n\t\t\t\t\t\t\tsetFollowScrollTop(nextPort, floor);\n\t\t\t\t\t\t\treportFollow(nextPort, true);\n\t\t\t\t\t\t\treturn;\n\t\t\t\t\t\t}\n\t\t\t\t\t\twaitingForContentGrowth = false;\n\t\t\t\t\t}\n\t\t\t\t\tconst predictGrowth = predictiveRef?.current ?? predictive;\n\t\t\t\t\tconst statusElement = turnStatusOf(nextPort);')
+
   // 旧行结束后等待实际接管或本轮结束；固定 260ms 在工具切换稍慢时仍会清空预留并跳底。
   out = swap(out, 'client/follow-handoff-helper', '\t\tfunction useConversationFollow(rootRef, active,', FOLLOW_HANDOFF + '\t\tfunction useConversationFollow(rootRef, active,')
   out = swap(
@@ -1611,6 +1760,7 @@ function patchClient(source) {
       '\t\t\tapplyThinkSettings();',
       '\t\t\tensureThinkPanelStyle();',
       '\t\t\tensureTurnProcessClockStyle();',
+      '\t\t\tctx.inject(["uiConversation"], (conversationCtx) => installBtwCommandVisibility(conversationCtx.uiConversation.events));',
       '\t\t\tif (ctx !== null && ctx !== void 0 && ctx.slots && typeof ctx.slots.inject === "function") {',
       '\t\t\t\tctx.slots.inject("settings.plugins.tab", () => ctx.slots.register({',
       '\t\t\t\t\tname: "settings.plugins.tab",',
