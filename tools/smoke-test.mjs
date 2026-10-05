@@ -273,10 +273,9 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
     click('stream-think-auto-expand')
     click('stream-think-auto-collapse')
     click('stream-think-control-scroll')
-    click('stream-think-cap-12')
     const saved = JSON.parse(store.get('dsh-stream-think:settings.v1'))
-    if (saved.autoExpand === false && saved.autoCollapse === false && saved.controlScroll === true && saved.capLines === 12 && documentElement.style.values['--dsh-stream-think-cap-lines'] === '12') {
-      ok('四项设置点击后立即写入并投影到运行时样式')
+    if (saved.autoExpand === false && saved.autoCollapse === false && saved.controlScroll === true) {
+      ok('三项设置点击后立即写入本地设置')
     } else bad('设置开关生效', JSON.stringify(saved))
     click('stream-think-show-edited-files')
     click('stream-think-show-thought-summary')
@@ -346,7 +345,7 @@ if (clockStart < 0 || clockEnd < 0) {
   bad('计时过渡函数提取', '产物里找不到计时函数')
 } else {
   const thoughtSelectorStart = clientSource.indexOf('function selectThoughtSummary(text) {')
-  const thoughtSelectorEnd = clientSource.indexOf('function RollingThinkSummary(', thoughtSelectorStart)
+  const thoughtSelectorEnd = clientSource.indexOf('function AnimatedReasoning({', thoughtSelectorStart)
   if (thoughtSelectorStart < 0 || thoughtSelectorEnd < 0) bad('思考摘要选择函数提取', '产物里找不到摘要选择函数')
   else vm.runInContext(clientSource.slice(thoughtSelectorStart, thoughtSelectorEnd), sandbox)
   vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function AnimatedReasoning({')), sandbox)
@@ -368,140 +367,6 @@ if (clockStart < 0 || clockEnd < 0) {
     if (got === want) ok(name)
     else bad(name, `期望 ${want}，实际 ${got}`)
   }
-  // 0.2 的运行中计时已移到 [data-chat-running]；验证真实 DOM 适配路径。
-  const liveEnd = clientSource.indexOf('function editPathsFromToolNode(', clockStart)
-  try {
-    let animationStarts = 0
-    class Node {
-      constructor(tag = 'span', text = '') {
-        this.nodeType = 1; this.tagName = tag; this.value = text; this.children = []
-        this.isConnected = true; this.classes = new Set(); this.dataset = {}; this.attributes = {}
-        this.classList = { add: (name) => this.classes.add(name), remove: (name) => this.classes.delete(name), contains: (name) => this.classes.has(name) }
-      }
-      get firstElementChild() { return this.children.find((child) => child.nodeType === 1) }
-      get lastElementChild() { return [...this.children].reverse().find((child) => child.nodeType === 1) }
-      get textContent() { return this.children.length ? this.children.map((child) => child.textContent).join('') : this.value }
-      set textContent(value) { this.value = value; this.children = [] }
-      appendChild(child) { child.parent = this; this.children.push(child); return child }
-      append(...children) { children.forEach((child) => this.appendChild(child)) }
-      setAttribute(name, value) { this.attributes[name] = value }
-      animate(keyframes, options) {
-        animationStarts += 1
-        const animation = { keyframes, options, cancel() { this.oncancel?.() } }
-        this.animation = animation
-        return animation
-      }
-      replaceChildren(fragment) { this.children = fragment.children }
-      remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this) }
-      matches(selector) { return selector === '[data-chat-running]' ? this.running === true : selector === '[data-step-process] button[data-process-activity]' && this.processTitle === true }
-      querySelectorAll(selector) {
-        const found = []
-        for (const child of this.children) {
-          if (child.matches?.(selector)) found.push(child)
-          found.push(...(child.querySelectorAll?.(selector) ?? []))
-        }
-        return found
-      }
-    }
-    const body = new Node('body')
-    const row = new Node('div'); row.running = true
-    const content = new Node('span')
-    const native = new Node('span')
-    const source = new Node('span', '深度求索中，用时34秒...')
-    native.append(source, new Node('span', '深度求索中，用时34秒...'))
-    content.append(new Node('svg'), native)
-    row.append(new Node('span'), new Node('span'), content)
-    body.appendChild(row)
-    const observers = []
-    class Observer {
-      constructor(callback) { this.callback = callback; observers.push(this) }
-      observe(target) { this.target = target }
-      disconnect() { this.target = null }
-    }
-    const fakeDocument = {
-      body,
-      createElement: (tag) => new Node(tag),
-      createTextNode: (value) => ({ nodeType: 3, textContent: value }),
-      createDocumentFragment: () => ({ children: [], appendChild(child) { this.children.push(child) } }),
-    }
-    const { installLiveRunningClock } = vm.runInNewContext(
-      clientSource.slice(clockStart, liveEnd) + '\n; ({ installLiveRunningClock })',
-      { document: fakeDocument, MutationObserver: Observer })
-    const detach = installLiveRunningClock()
-    const overlay = content.lastElementChild
-    if (native.classes.has('dsh-stream-think-live-native') && overlay.textContent === source.textContent) ok('0.2 运行状态行接管且首帧文字完整')
-    else bad('0.2 运行状态行接管', '未正确显示初始计时')
-    source.textContent = '深度求索中，用时35秒...'
-    observers.find((observer) => observer.target === source)?.callback([])
-    if (overlay.textContent.includes('35秒') && overlay.children.some((child) => child.className === 'dsh-stream-think-clock-number')) ok('0.2 运行中秒数滚动')
-    else bad('0.2 运行中秒数滚动', overlay.textContent)
-    source.textContent = '深度求索中，用时42秒...'
-    observers.find((observer) => observer.target === source)?.callback([])
-    if (overlay.textContent === source.textContent && !overlay.children.some((child) => child.className === 'dsh-stream-think-clock-number')) ok('0.2 跳秒直接更新')
-    else bad('0.2 跳秒直接更新', overlay.textContent)
-    detach()
-    if (!native.classes.has('dsh-stream-think-live-native') && !content.classes.has('dsh-stream-think-live-content')) ok('0.2 卸载恢复原生计时')
-    else bad('0.2 卸载恢复原生计时', '原生文本仍被隐藏')
-
-    const group = new Node('div')
-    const button = new Node('button'); button.processTitle = true
-    const titleNative = new Node('span')
-    const label = new Node('span')
-    const titleText = new Node('span', '正在分析请求 · 检查文件')
-    label.appendChild(titleText)
-    titleNative.appendChild(label)
-    titleNative.querySelector = () => label
-    button.append(new Node('span'), titleNative)
-    group.appendChild(button)
-    body.appendChild(group)
-    let motionPreference = 'auto'
-    let titleNow = 0
-    const { installProcessTitleFlip } = vm.runInNewContext(
-      clientSource.slice(clockStart, liveEnd) + '\n; ({ installProcessTitleFlip })',
-      { document: fakeDocument, MutationObserver: Observer, performance: { now: () => titleNow }, window: { matchMedia: () => ({ matches: false }) } })
-    const detachTitle = installProcessTitleFlip(() => motionPreference)
-    const titleViewport = button.children[2]
-    const titleOverlay = titleViewport.children[0]
-    titleText.textContent = '正在分析请求 · 修复滚动'
-    observers.find((observer) => observer.target === titleNative)?.callback([])
-    const firstOld = titleViewport.children.find((child) => child.dataset.old === '')
-    const firstTransition = titleOverlay.textContent === titleText.textContent && firstOld?.textContent === '正在分析请求 · 检查文件' && titleOverlay.animation?.options.duration === 240
-    const firstAnimationStarts = animationStarts
-    titleNow = 150
-    titleText.textContent = '正在分析请求 · 检查动画'
-    observers.find((observer) => observer.target === titleNative)?.callback([])
-    const noRestart = animationStarts === firstAnimationStarts
-    titleOverlay.animation?.onfinish?.()
-    const settled = titleOverlay.textContent === titleText.textContent && !titleViewport.children.some((child) => child.dataset.old === '')
-    if (firstTransition && noRestart && settled) ok('0.2 高频标题更新合并，当前翻页完成后呈现最新内容')
-    else bad('过程组标题高频更新', `动画启动 ${animationStarts - firstAnimationStarts} 次；settled=${settled}`)
-    motionPreference = 'force-reduced'
-    titleText.textContent = '正在分析请求 · 完成'
-    observers.find((observer) => observer.target === titleNative)?.callback([])
-    if (titleOverlay.textContent === titleText.textContent && !titleViewport.children.some((child) => child.dataset.old === '')) ok('过程标题遵守减少动态效果')
-    else bad('过程标题减少动态效果', '仍保留动画旧层')
-    motionPreference = 'auto'
-    const beforeBurst = animationStarts
-    for (let index = 0; index < 20; index += 1) {
-      titleNow += 150
-      titleText.textContent = `正在分析请求 · 第 ${index} 次更新`
-      observers.find((observer) => observer.target === titleNative)?.callback([])
-    }
-    const decorative = new Node('span', titleText.textContent)
-    titleNative.appendChild(decorative)
-    observers.find((observer) => observer.target === titleNative)?.callback([])
-    if (animationStarts === beforeBurst && titleOverlay.textContent === titleText.textContent && !titleOverlay.textContent.includes(titleText.textContent + titleText.textContent)) {
-      ok('连续 150ms 更新不重启动画，装饰副本不重复显示')
-    } else bad('高频过程标题', `动画启动 ${animationStarts - beforeBurst} 次；标题=${titleOverlay.textContent}`)
-    titleNow += 1000
-    titleText.textContent = '正在分析请求 · 尝试： ```js JSON.stringify(document.body.innerText)'
-    observers.find((observer) => observer.target === titleNative)?.callback([])
-    if (titleOverlay.textContent === '正在分析请求 · 代码片段') ok('实际过程标题动画不展示原始代码')
-    else bad('过程标题代码正文', titleOverlay.textContent)
-    detachTitle()
-    if (!button.classes.has('dsh-stream-think-process-title') && !titleNative.classes.has('dsh-stream-think-process-native') && button.children.length === 2) ok('过程标题卸载恢复原生 DOM')
-    else bad('过程标题卸载', '原生标题仍被隐藏或留有叠层')
-  } catch (error) { bad('0.2 运行计时 DOM 回归', error) }
   const result = (name, argsRaw, isError = false) => ({ kind: 'tool-result', callId: name, isError, call: { name, argsRaw }, subCalls: [] })
   const toolNode = (root) => ({ kind: 'tool-call', data: { root } })
   const edits = [
@@ -765,19 +630,13 @@ if (clockStart < 0 || clockEnd < 0) {
   const duplicateData = { root: { ...result('read_file', JSON.stringify({ path: '/work/a.ts' })), callId: 'shared-call' } }
   if (toolDataHighlights([duplicateData, duplicateData]).actions.length === 1 && thoughtDataHighlights([{ status: 'running', blocks: [{ kind: 'reasoning', text: '先核对已经修改的文件。' }, { kind: 'reasoning', text: '现在继续检查其它内容。' }] }]).length === 1) ok('原生分类合并重复调用，运行中只收录已结束思考')
   else bad('原生数据去重与思考状态', '出现重复或半截思考')
-  if (clientSource.includes('padding-bottom:16px;scroll-padding-bottom:16px') && clientSource.includes('lastRunningForScrollRef') && clientSource.includes('mask-image:none;scrollbar-gutter:auto')) {
-    ok('Think 预览补足底部空间，并去除展开时的外层滚动截断')
-  } else bad('Think 底部修复', '产物缺少底部空间或外层滚动规则')
-  if (clientSource.includes('.I17U7q_disclosureContent[data-collapsed]>.I17U7q_thinkBody{padding-top:0;padding-bottom:0;overflow:hidden}') && clientSource.includes('.I17U7q_disclosureContent[data-no-transition]>.I17U7q_thinkBody{transition:none}')) {
-    ok('Think 收起后清除预览留白，减少动态效果时不播放补偿动画')
-  } else bad('Think 收起行距', '收起状态仍可能保留底部留白')
 }
 
 /* ---------------- 4. 思考状态与宿主折叠真值表 ---------------- */
 
 const handoffStart = clientSource.indexOf('function waitForFollowHandoff(host, isLeader, enabled, finish) {')
 const handoffEnd = clientSource.indexOf('function useConversationFollow(', handoffStart)
-if (handoffStart < 0 || handoffEnd < 0 || !clientSource.includes('waitForFollowHandoff(host, () => isLeader(host), () => controlScrollRef.current, finishInactive)')) {
+if (handoffStart < 0 || handoffEnd < 0 || !clientSource.includes('waitForFollowHandoff(host, () => isLeader(host), () => true, finishInactive)')) {
   bad('滚动交接逻辑', '产物缺少等待真实接管的路径')
 } else {
   const timeouts = []
@@ -836,10 +695,10 @@ if (settingsStart < 0 || settingsEnd < 0) bad('组外开关旧设置迁移', '�
 else {
   const readThinkSettings = vm.runInNewContext(
     clientSource.slice(settingsStart, settingsEnd) + '\n; readThinkSettings',
-    { window: { localStorage: { getItem: (key) => key === 'dsh-think-ux:settings.v1' ? JSON.stringify({ autoExpand: false, capLines: 12, showLookups: true, showEditedFiles: false }) : null } } },
+    { window: { localStorage: { getItem: (key) => key === 'dsh-think-ux:settings.v1' ? JSON.stringify({ autoExpand: false, showLookups: true, showEditedFiles: false }) : null } } },
   )
   const migrated = readThinkSettings()
-  if (migrated.showReads && migrated.showSearches && !migrated.showEditedFiles && migrated.showTaskUpdates && !migrated.autoExpand && migrated.capLines === 12) ok('旧思考盒偏好迁移到新入口，新任务开关采用默认值')
+  if (migrated.showReads && migrated.showSearches && !migrated.showEditedFiles && migrated.showTaskUpdates && !migrated.autoExpand) ok('旧思考盒偏好迁移到新入口，新任务开关采用默认值')
   else bad('组外开关旧设置迁移', JSON.stringify(migrated))
 }
 
@@ -883,85 +742,19 @@ if (helpersStart < 0 || helpersEnd < 0) {
   } else bad('思考行交接', '未遵守轮次状态与自动收起设置')
 }
 
-/* A line flip must keep one measured row, while ordinary token growth stays quiet. */
+/* Think 摘录选句规则：八类摘要的「思考摘录」类目依赖它（行内翻页组件已移除）。 */
 const summaryStart = clientSource.indexOf('function selectThoughtSummary(text) {')
 const summaryEnd = clientSource.indexOf('function AnimatedReasoning({', summaryStart)
 if (summaryStart < 0 || summaryEnd < 0) {
-  bad('Think 摘要组件提取', '找不到翻页组件')
+  bad('Think 摘要选句函数提取', '找不到选句函数')
 } else {
-  const slots = []
-  let cursor = 0
-  let layoutEffects = []
-  let effects = []
-  let summaryNow = 0
-  let scheduledFrames = 0
-  let pendingScrollFrame = null
-  const summaryElement = { scrollLeft: 0, get scrollWidth() { throw new Error('流式摘要不应同步测量布局') } }
-  const fakeReact = {
-    createElement(type, props, ...children) {
-      if (props?.ref) props.ref.current = summaryElement
-      return { type, props, children }
-    },
-    useRef(value) {
-      const index = cursor++
-      if (!(index in slots)) slots[index] = { current: value }
-      return slots[index]
-    },
-    useState(value) {
-      const index = cursor++
-      if (!(index in slots)) slots[index] = value
-      return [slots[index], (next) => { slots[index] = next }]
-    },
-    useLayoutEffect(effect) { layoutEffects.push(effect) },
-    useEffect(effect) { effects.push(effect) },
-  }
-  const { selectThoughtSummary, RollingThinkSummary } = vm.runInNewContext(clientSource.slice(summaryStart, summaryEnd) + '\n; ({ selectThoughtSummary, RollingThinkSummary })', {
-    react: fakeReact,
-    cx: (...parts) => parts.filter(Boolean).join(' '),
-    TypewriterAssistantNodeView_module_css_default: { thinkSummary: 'native-think-summary' },
-    performance: { now: () => summaryNow },
-    setTimeout, clearTimeout,
-    requestAnimationFrame(callback) { scheduledFrames += 1; pendingScrollFrame = callback; return scheduledFrames },
-    cancelAnimationFrame() { pendingScrollFrame = null },
-  })
-  const render = (text, reduced = false) => {
-    cursor = 0
-    layoutEffects = []
-    effects = []
-    const tree = RollingThinkSummary({ text, line: text.trimEnd().lastIndexOf('\n'), followEnd: true, reduced })
-    for (const effect of layoutEffects) effect()
-    effects[1]()
-    return tree
-  }
-  const first = render('正在分析')
-  const growing = render('正在分析请求')
-  render('正在分析请求\n检查文件')
-  const flipped = render('正在分析请求\n检查文件')
-  const continued = render('正在分析请求\n检查文件列表')
-  render('正在分析请求\n检查文件列表\n下一行')
-  const rapidLine = render('正在分析请求\n检查文件列表\n下一行')
-  summaryNow = 600
-  render('正在分析请求\n检查文件列表\n下一行\n完成')
-  const settledLine = render('正在分析请求\n检查文件列表\n下一行\n完成')
-  render('正在分析请求\n检查文件列表\n下一行', true)
-  const reduced = render('正在分析请求\n检查文件列表\n下一行', true)
-  if (first.children[1] === false && growing.children[1] === false && flipped.children[1]?.props['aria-hidden'] === true && flipped.children[0]?.props.className.includes('summary-enter') && continued.children[1]?.children[0] === '正在分析请求' && rapidLine.children[1] === false && settledLine.children[1]?.props['aria-hidden'] === true && reduced.children[1] === false) {
-    ok('Think 摘要首次换行翻页，密集换行与减少动态效果直接更新')
-  } else bad('Think 摘要翻页', '换行、添字或减少动态效果的渲染不符预期')
+  const { selectThoughtSummary } = vm.runInNewContext(clientSource.slice(summaryStart, summaryEnd) + '\n; ({ selectThoughtSummary })', {})
   const meaningful = selectThoughtSummary('先检查输入。\n已定位到分组按钮多出 22px 左边距。\n调用。')
   const short = selectThoughtSummary('调用。')
   const start = selectThoughtSummary('开始。')
   const longLine = selectThoughtSummary('已确认读取结果，并定位到缓存键错误。调用。')
   if (meaningful.text === '已定位到分组按钮多出 22px 左边距。' && !meaningful.followEnd && short.text === '' && start.text === '' && longLine.text === '已确认读取结果，并定位到缓存键错误。') ok('Think 摘要跳过末尾空泛短句，运行中与完成后都不伪装成结论')
   else bad('Think 摘要选句', JSON.stringify({ meaningful, short, start, longLine }))
-  try {
-    pendingScrollFrame?.()
-    if (scheduledFrames === 1 && summaryElement.scrollLeft === 1e9) ok('高频添字合并为单帧横向滚动，无强制布局读取')
-    else bad('摘要滚动合批', `排队 ${scheduledFrames} 帧，scrollLeft=${summaryElement.scrollLeft}`)
-  } catch (error) { bad('摘要滚动布局', error) }
-  if (clientSource.includes('.dsh-stream-think-summary{position:relative;display:block;flex:auto;min-width:0;height:24px;overflow:hidden')) {
-    ok('Think 摘要过渡固定行高，不推动外层会话')
-  } else bad('Think 摘要固定高度', '缺少固定 24px 容器')
 }
 
 /* DSH keeps the same scroll element while changing the active Session. */
@@ -993,9 +786,10 @@ if (padStart < 0 || padEnd < 0 || sessionFollowStart < 0 || sessionFollowEnd < 0
   const newFlow = { style: { paddingBottom: '12px' } }
   let writes = 0
   let position = 420
-  const port = { flow: oldFlow, get scrollTop() { return position }, set scrollTop(value) { writes += 1; position = value } }
   let session = 'A'
-  const root = { closest: () => ({ getAttribute: () => session }) }
+  const sessionElement = { getAttribute: () => session }
+  const port = { flow: oldFlow, closest: () => sessionElement, get scrollTop() { return position }, set scrollTop(value) { writes += 1; position = value } }
+  const root = { closest: () => sessionElement }
   isolateFollowSession(port, root)
   setFlowPad(port, 24)
   maps.followLeaders.set(port, { owner: 'A' })
@@ -1005,7 +799,6 @@ if (padStart < 0 || padEnd < 0 || sessionFollowStart < 0 || sessionFollowEnd < 0
   isolateFollowSession(port, root)
   const resetOnce = clears === 1 && flowFills === 1 && oldFlow.style.paddingBottom === '8px' && newFlow.style.paddingBottom === '12px' && !padRegistry.has(port) && !maps.followLeaders.has(port) && !sets.followCompletionSettle.has(port) && writes === 0
   isolateFollowSession(port, root)
-  const guarded = clientSource.includes('else if (boundSession !== currentSession) return;') && clientSource.includes('if (!following || port === null || !isOriginalSession(port)) return;') && clientSource.includes('if (!isOriginalSession(host)) {\n\t\t\t\t\t\tisolateFollowSession(host, host);') && clientSource.includes('if (disabledHost !== null && !isOriginalSession(disabledHost)) isolateFollowSession(disabledHost, disabledHost);') && clientSource.includes('if (followSessionActivations.has(nextPort)) return;')
   const duplicateSkipped = clears === 1
   setFlowPad(port, 18)
   session = null
@@ -1018,7 +811,7 @@ if (padStart < 0 || padEnd < 0 || sessionFollowStart < 0 || sessionFollowEnd < 0
   const oldMicrotasksIgnored = followSessionActivations.get(port) === latestActivation
   sessionMicrotasks.at(-1)?.()
   const restoredAfterCommit = !followSessionActivations.has(port)
-  if (resetOnce && duplicateSkipped && blankCleared && clears === 3 && guarded && oldMicrotasksIgnored && restoredAfterCommit && clientSource.includes('isolateFollowSession(nextPort, root);\n\t\t\t\t\tif (followSessionActivations.has(nextPort)) return;')) ok('切换两个运行会话时清理旧滚动归属和预留，等待宿主恢复新会话阅读位置')
+  if (resetOnce && duplicateSkipped && blankCleared && clears === 3 && oldMicrotasksIgnored && restoredAfterCommit) ok('切换两个运行会话时清理旧滚动归属和预留，等待宿主恢复新会话阅读位置')
   else bad('跨会话滚动隔离', JSON.stringify({ clears, flowFills, oldPad: oldFlow.style.paddingBottom, newPad: newFlow.style.paddingBottom, writes, resetOnce, duplicateSkipped, blankCleared, oldMicrotasksIgnored, restoredAfterCommit }))
 }
 
@@ -1090,6 +883,12 @@ if (foldStart < 0 || foldEnd < 0) {
   const keptHidden = keptFold({ ...settledProps, keepVisibleAfterLive: true })
   if (!keptHidden) ok('关闭自动收起后保持当前思考可见')
   else bad('关闭自动收起', '宿主折叠提前隐藏了当前思考')
+
+/* 语义：推理中的手动展开不设豁免（本段结束仍按设置收起）；只有已完成的思考点开后才交给读者。 */
+const toggleAt = clientSource.indexOf('onToggle: () => {')
+const toggleSeg = toggleAt < 0 ? '' : clientSource.slice(toggleAt, toggleAt + 400)
+if (toggleSeg.includes('if (!running) userToggledRef.current = true;')) ok('推理中手动展开仍会在本段结束时收起，已完成的思考点开后不再被打扰')
+else bad('自动收起语义', 'onToggle 缺少「仅已完成的思考才设读者豁免」分支')
 }
 
 /* ---------------- 5. Host 半边导入 ---------------- */

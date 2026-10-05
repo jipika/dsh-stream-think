@@ -16,6 +16,64 @@
 
 ---
 
+## 2026-10-04 精简：只保留官方没有的能力
+
+DSH `0.2.0-rc.2` 的官方 Chat 渲染器（`@deepseek-ai/dsh-client-ui-chat`）已经自带下列能力，
+本插件里与它们重复的实现已删除；**本文档下半部分对应段落的描述已不代表现状**：
+
+| 已移除 | 官方现在的等价实现 |
+| --- | --- |
+| 思考体限高预览：`capLines` 4/12/24/48/不限、`[data-think-cap]`、推理期「跟到框底」、设置页那一段 | 过程组 body `max-height:min(400px,50vh)` + `overflow-y:auto` + 1px 阈值平滑贴底 + 上下渐隐遮罩 |
+| 「展开 Think 时取消外层过程组限高与遮罩」的两条 CSS | 官方那套限高正是 0.2 的原生设计，不再压制 |
+| 收起态 Think 行的摘录翻页组件（`RollingThinkSummary`） | 官方 `latestCompletedParagraphFirstLine` 摘录 + TextShimmer 高光 + 右端 48px 渐隐 |
+| 过程计时数字 220ms 上滚、过程组标题 240ms 翻页 | 官方每秒刷新 + 等宽数字、无过渡（`installLiveRunningClock` / `installProcessTitleFlip` 只剩未被调用的定义） |
+| ~~外层会话滚动跟随~~ **2026-10-04 晚改回插件执行，但语义收窄为「跟随动画」** | 见下节：跟随始终由本插件执行，`controlScroll` 只切「平滑 / 瞬时」；官方 `toBottom(..., "instant")` 那条链仅作为对照 |
+
+**保留**（官方没有等价物）：八类分组摘要、打字机式正文流、Think 行自动展开 / 结束后自动收起 / 读者优先、
+`/btw` 旁问卡片、`aria-label` 诊断探针。`selectThoughtSummary` 选句函数保留 —— 八类摘要里的「思考摘录」类目依赖它。
+
+规模：具名补丁 89 → 76 处，`derive.mjs` 1921 → 1735 行，`lib/client.js` 333 → 327 KB。
+验证：`node tools/derive.mjs --check && node tools/derive.mjs && node tools/smoke-test.mjs`（全绿）。
+
+---
+
+## 2026-10-05 残留清理 + 宿主样式收敛
+
+**删掉的死代码 / 无效样式 / 死参数**（运行时零影响，但会误导后续维护）：
+
+- 死函数 `installLiveRunningClock`、`installProcessTitleFlip`（各有定义、无调用）；
+- `THINK_CAP_CSS` 常量块、`.dsh-stream-think-summary*` 的 5 行 CSS；
+- `capOptions`、`THINK_CAP_VAR`、`capLines` 的投影与解析块、`thinkCapLines` 的 5 处引用（含 `aria-label` 探针里的 `cap=` 字段）。
+
+**删掉 3 条改官方行间距的 `!important`**（最容易被察觉为「和没装插件不一样」的地方）：它们此前会全局改写官方过程行的行间距——
+
+```
+[data-step-process-content] > [data-chat-flow-kind]{--dsh-chat-flow-gap:8px!important}
+[data-step-process]:has([data-variant=think]) + [data-chat-group-part=response]{--dsh-chat-flow-gap:8px!important}
+…同上 + :is([data-step-process],[data-chat-flow-kind=tool-call],…) 的长版本
+```
+
+删掉后行间距回到 DSH 默认。**保留的 3 条 `!important`** 都只在插件自己的标记属性/类存在时命中（空 clock 容器收高、把原生计时文字透明化、摘要块与下一过程的 4px 间距）。
+
+规模：`lib/client.js` 321980 → 311880 B；`smoke-test.mjs` 同步删掉「0.2 运行计时 DOM 回归」整块（134 行）与 capLines 迁移断言，复跑全绿。
+
+---
+
+## 2026-10-04（晚）`controlScroll` 收窄为纯「跟随动画」开关
+
+跟随**始终**由本插件执行（effect 开头的 `if (!controlScroll) return;` 已删除），开关只决定动画形式：
+
+| 开关 | 行为 |
+| --- | --- |
+| 开（默认） | 平滑：帧循环按速度逐帧追到底（`computeFollowStep` + 底部预留 runway） |
+| 关 | 瞬时：每帧直接 `animatedH = contentHeight - runwayOffset` 落到底，并把 `reservePx` 归零（不造预留、不做速度积分） |
+
+相关补丁：`client/animation-only-switch`（不再交回宿主）、`client/instant-follow-mode`（帧循环两条分支）、
+`client/instant-no-runway`（瞬时模式不预留）。`waitForFollowHandoff` 的 `enabled` 也从
+`() => controlScrollRef.current` 改为 `() => true` —— 跟随常驻，交接等待不再因为「关了动画」而提前放弃。
+
+---
+
 ## 一、它修的是什么
 
 ### 症状
@@ -113,8 +171,9 @@ running: streaming && isReasoningLive(data.blocks, index),
 - **自动展开**（`autoExpand`，默认开）：进入思考时展开；
 - **结束后自动收起**（`autoCollapse`，默认开）：从思考 → 结算那一次转换才收起，
   且只在**确实展开着**时收；先播放内层高度过渡，再恢复宿主折叠；关闭时保留本轮刚生成的思考；
-- **读者优先**：一旦你亲手点开/收起过这一行，自动逻辑对**这一行**永久放手
-  （`userToggledRef`），不会再被流抢回去；
+  **推理中手动展开的同样算在内** —— 这一段结束时照样收起；
+- **读者优先只在「这段推理结束之后」生效**：`userToggledRef` 只在 `!running` 的手动操作里置位，
+  所以已完成的思考一旦被点开，自动逻辑就再也不动它（不会再被流抢回去）；
 - **上游设置卡的开关不再参与**：`thinkAutoExpand` 只认本插件这一份设置。上游那个开关在排障时
   会变成干扰源 —— 任何一处关过，都会让另一边看起来「明明开着却不生效」（本次故障的第二个根因就藏在
   这条链路上）。
@@ -145,6 +204,10 @@ DSH 0.2 的运行状态行使用 `[data-chat-running]`。跟随器现在识别�
 DSH 0.2 在切换对话时会复用外层滚动容器，因此本插件按会话隔离跟随状态：
 切换时清理旧会话的动画位移、底部预留和完成回调，不向新会话写入旧的滚动位置。
 新会话的阅读位置仍由 DSH 的会话滚动记忆恢复。
+跟随还绑定具体会话容器与其本次挂载：即使快速 A→B→A、同 id 容器更换，
+或者旧行先卸载、新会话后提交，旧动画帧、等待接管与结束回调都会失效。
+旧行清理不会替新会话建立状态；历史行入场在首次布局阶段同步取消，
+按原生节点身份识别，重新分组换 DOM 时也不会重播已有文字。
 重新进入仍在运行的对话时，首批已有行直接显示，不重播入场或逐字显示，
 也不凭运行状态重新制造滚动预留。只有实际内容增长后才启动跟随动画；
 原本在底部就保持贴底，原本在历史内容处就保留阅读位置，无需额外开关。
@@ -176,27 +239,17 @@ DSH 0.2 的分类记录直接订阅当前轮的原生节点数据，首次显示
 执行中，已完成的记录也实时显示在对话中；尚未结束的工具调用和半截思考不会提前显示。
 这些分组独立于原生过程组的展开状态。
 
-### 展开预览（并入原思考盒插件的能力）
+### 展开预览（2026-10-04 已移除）
 
-展开的思考体默认**限高 24 行**，超出部分在框内滚动，推理期间自动跟着最新一行走
-（读者往上翻时停止跟随）。行数在设置里可选 4 / 12 / 24 / 48 / 不限。
-高度按当前实际行高计算，字体缩放后仍显示完整的所选行数；底部留出可滚到的空间。
-单条 Think 收起后会清掉这段预览留白，避免下一条工具记录被额外推开。
-展开 Think 时取消外层过程组的高度限制和边缘遮罩，只保留 Think 框本身的滚动，
-避免两层滚动与渐隐把末行盖住；滚到 Think 框边缘后可继续滚动外层会话。
+限高预览（默认 24 行、框内滚动、`[data-think-cap]`、设置项「展开时的预览行数」，
+以及为它压制外层过程组限高的两条 CSS）已全部删除 —— 现在由官方的过程组滚动盒接管：
+`max-height:min(400px,50vh)` + `overflow-y:auto` + 1px 阈值平滑贴底 + 上下渐隐遮罩。
 
-限高写在 grid **子元素**上（`.thinkBody[data-think-cap]`），不是 grid 容器 ——
-disclosure 的 0fr/1fr 高度动画靠 `min-height:0` 撑开轨道，把 `max-height` 挂在容器上
-会让轨道塌陷成「思考框一片空白且滚不动」（老思考盒插件踩过的同一个坑）。
+### 过程计时（2026-10-04 已停止数字过渡）
 
-### 过程计时
-
-DSH 0.2.0-rc.1 将运行中的「深度求索中，用时…」移到会话末尾的
-`[data-chat-running]` 状态行；`turn-process` 现在只显示已结束轮次的用时。
-插件同时识别新状态行和旧过程行，保留原生计时、按钮与读屏状态，仅让逐秒递增的
-数字在 220 毫秒内向上滚动；跳秒、位数或时间单位变化时直接更新。
-数字采用等宽排版，系统启用「减少动态效果」时不播放过渡。新状态行卸载时会恢复
-原生文字和样式，不改动宿主的计时逻辑。
+DSH 0.2.0-rc.1 将运行中的「深度求索中，用时…」移到会话末尾的 `[data-chat-running]` 状态行；
+`turn-process` 只显示已结束轮次的用时。两处现在都按官方原样渲染：每秒刷新、等宽数字、
+**没有过渡动画**（插件原先的 220ms 数字上滚与 240ms 标题翻页已不再被调用）。
 
 ---
 
@@ -213,10 +266,9 @@ Host 半边同理。**所有差异都由 `tools/derive.mjs` 具名补丁生成**
 ### 设置入口（两个，各管一段）
 
 1. **设置 → 插件 → 思考盒**（本插件新增，存 localStorage，改完立刻生效）
-   - 生成时自动展开 Think —— 仅作用于当前单条 Think，关闭后未手动操作的当前行会收起
-   - **流式跟随（滚动动画）** —— 控制外层会话跟随；过程组和 Think 框可独立滚动
-   - 单段推理结束后收起 Think —— 不控制 DSH 原生的过程组折叠
-   - 展开时的预览行数：4 / 12 / 24 / 48 / 不限
+   - 生成时自动展开 Think —— 仅作用于当前单条 Think（推理中手动展开的，也会在这一段结束时收起）
+   - **跟随动画** —— 平滑（逐帧追到底，默认）或瞬时（内容一变就落底）；跟随本身始终由本插件执行，过程组和 Think 框可独立滚动
+   - 单段推理结束后收起 Think —— 不控制 DSH 原生的过程组折叠；**推理中手动展开的同样会被收起**，已完成的思考点开后不再自动收
    - 直接显示在对话中：任务清单、目标操作、文件编辑、思考摘录、命令、读取、搜索、其他工具；八类独立开关和展开
 2. **设置 → 插件配置 → 流式输出**（沿用上游设置卡，存 Host 设置）
    - 启用 / 对数渐隐 / 动效偏好；上游的重复滚动与自动展开开关已从卡片移除
@@ -242,6 +294,10 @@ python3 tools/think-layout-browser.py  # 同时加载两层生成样式，验证
 python3 tools/short-conversation-browser.py
 python3 tools/follow-status-browser.py
 python3 tools/session-resume-browser.py  # 运行中切换、布局收缩、状态行完整露出与发送后跟随
+python3 tools/session-lifecycle-browser.py  # 卸载/切换顺序、快速往返、容器更换和离页
+python3 tools/session-entry-browser.py  # 历史首帧/重新分组不重播，新记录仍有入场
+# 实际 React 18 + Chromium：300 条历史挂载、字体缩放与内部跟随
+DSH_TEST_NODE_MODULES=/path/to/existing/node_modules python3 tools/history-layout-performance-browser.py
 
 # 5. 配置层静态验证（不需要启动应用）
 dsh --profile web --dump-config | grep -A6 'id: stream-think'

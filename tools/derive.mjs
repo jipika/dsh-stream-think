@@ -93,7 +93,7 @@ const IS_REASONING_LIVE = [
 ].join('\n')
 
 /** Think 摘录只选最近的实质性句子；切到新句时翻页，流式添字不反复重播。 */
-const ROLLING_THINK_SUMMARY = String.raw`
+const THOUGHT_SUMMARY_PICKER = String.raw`
 		function selectThoughtSummary(text) {
 			const limit = Math.max(0, text.length - 8192);
 			const meaningfulEnd = text.trimEnd().length;
@@ -118,57 +118,6 @@ const ROLLING_THINK_SUMMARY = String.raw`
 				}
 			}
 			return { text: "", line: -1, followEnd: false };
-		}
-		function RollingThinkSummary({ text, line, followEnd, reduced }) {
-			const rootRef = (0, react.useRef)(null);
-			const previousRef = (0, react.useRef)({ text, line });
-			const lastFlipAtRef = (0, react.useRef)(-Infinity);
-			const scrollFrameRef = (0, react.useRef)(0);
-			const followEndRef = (0, react.useRef)(followEnd);
-			followEndRef.current = followEnd;
-			const [outgoing, setOutgoing] = (0, react.useState)(null);
-			(0, react.useLayoutEffect)(() => {
-				const previous = previousRef.current;
-				previousRef.current = { text, line };
-				const now = performance.now();
-				if (previous.line !== line && previous.text !== "" && text !== "" && !reduced && outgoing === null && now - lastFlipAtRef.current >= 560) {
-					lastFlipAtRef.current = now;
-					setOutgoing({ text: previous.text, line });
-				} else if (previous.line !== line || reduced) setOutgoing(null);
-			}, [text, line, reduced, outgoing]);
-			(0, react.useEffect)(() => {
-				if (outgoing === null) return;
-				const timer = setTimeout(() => setOutgoing(null), 260);
-				return () => clearTimeout(timer);
-			}, [outgoing]);
-			(0, react.useEffect)(() => {
-				if (scrollFrameRef.current !== 0) return;
-				scrollFrameRef.current = requestAnimationFrame(() => {
-					scrollFrameRef.current = 0;
-					const element = rootRef.current;
-					if (element !== null) element.scrollLeft = followEndRef.current ? 1e9 : 0;
-				});
-			}, [text, followEnd, outgoing]);
-			(0, react.useEffect)(() => {
-				return () => {
-					if (scrollFrameRef.current !== 0) cancelAnimationFrame(scrollFrameRef.current);
-					scrollFrameRef.current = 0;
-				};
-			}, []);
-			return (0, react.createElement)("span", {
-				ref: rootRef,
-				className: cx(TypewriterAssistantNodeView_module_css_default.thinkSummary, "dsh-stream-think-summary"),
-				"data-follow-end": followEnd || void 0
-			},
-				(0, react.createElement)("span", {
-					key: line,
-					className: cx("dsh-stream-think-summary-current", outgoing?.line === line ? "dsh-stream-think-summary-enter" : "")
-				}, text),
-				outgoing !== null && (0, react.createElement)("span", {
-					key: "old-" + line,
-					className: "dsh-stream-think-summary-old",
-					"aria-hidden": true
-				}, outgoing.text));
 		}
 `
 
@@ -220,15 +169,20 @@ const FOLLOW_HANDOFF = String.raw`
 const FOLLOW_SESSION_ISOLATION = String.raw`
 		const followSessionOwners = new WeakMap();
 		const followSessionActivations = new WeakMap();
+		const followSessionLifetimes = new WeakMap();
 		const followSessionEntryRows = new WeakSet();
 		function followSessionOf(element) {
 			return element?.closest("[data-conversation-session]")?.getAttribute("data-conversation-session") ?? null;
 		}
-		function isolateFollowSession(port, root) {
-			const session = followSessionOf(root);
-			const previous = followSessionOwners.get(port);
-			if (previous === session) return;
-			if (previous !== void 0) {
+		function releaseFollowSession(port, lifetime) {
+			if (lifetime?.released) return;
+			if (lifetime !== void 0) {
+				lifetime.released = true;
+				lifetime.observer?.disconnect();
+			}
+			if (lifetime !== void 0 && followSessionLifetimes.get(port) !== lifetime) return;
+			if (followSessionOwners.has(port)) {
+				followLeaders.get(port)?.cancel?.();
 				clearVisual(port);
 				setFlowPad(port, 0);
 				restoreFlowFill(port);
@@ -246,8 +200,57 @@ const FOLLOW_SESSION_ISOLATION = String.raw`
 				followActivityAt.delete(port);
 				debugRuntime.reportFollow(port, null);
 			}
+			followSessionOwners.delete(port);
+			followSessionLifetimes.delete(port);
+			followSessionActivations.delete(port);
+		}
+		function followSessionLifetimeChanged(port, lifetime, changes = lifetime.observer?.takeRecords() ?? []) {
+			if (lifetime.released || port.isConnected === false || port.closest("[data-conversation-session]") !== lifetime.element || followSessionOf(port) !== lifetime.session) return true;
+			// Queued records also catch A→B→A and detach→reattach within one task.
+			return changes.some((change) => change.type === "attributes"
+				? change.oldValue !== lifetime.session
+				: [...change.removedNodes].some((node) => node === lifetime.element || node.contains?.(lifetime.element)));
+		}
+		function currentFollowSessionLifetime(port) {
+			const lifetime = followSessionLifetimes.get(port);
+			if (lifetime !== void 0 && followSessionLifetimeChanged(port, lifetime)) {
+				releaseFollowSession(port, lifetime);
+				return void 0;
+			}
+			return lifetime;
+		}
+		function isFollowSessionEntryRow(root) {
+			const row = root?.closest("[data-chat-flow-key]");
+			if (!row) return false;
+			if (followSessionEntryRows.has(row)) return true;
+			const port = root.closest("[data-conversation-scroll]");
+			const key = row.getAttribute("data-chat-node-key") ?? row.getAttribute("data-chat-flow-key");
+			return port !== null && key !== null && currentFollowSessionLifetime(port)?.entryKeys.has(key) === true;
+		}
+		function isolateFollowSession(port, root) {
+			const session = followSessionOf(root);
+			currentFollowSessionLifetime(port);
+			const previous = followSessionOwners.get(port);
+			if (previous === session) return;
+			if (previous !== void 0) releaseFollowSession(port, followSessionLifetimes.get(port));
+			const element = root.closest("[data-conversation-session]");
+			const lifetime = { session, element, entryKeys: new Set(), released: false, observer: null };
 			// Initial committed rows are restored history, even if their Turn remains open.
-			for (const row of port.querySelectorAll?.("[data-chat-flow-key]") ?? []) followSessionEntryRows.add(row);
+			for (const row of port.querySelectorAll?.("[data-chat-flow-key]") ?? []) {
+				followSessionEntryRows.add(row);
+				const key = row.getAttribute("data-chat-node-key") ?? row.getAttribute("data-chat-flow-key");
+				if (key !== null) lifetime.entryKeys.add(key);
+			}
+			followSessionLifetimes.set(port, lifetime);
+			if (typeof MutationObserver !== "undefined" && element !== null) {
+				lifetime.observer = new MutationObserver((changes) => {
+					if (followSessionLifetimeChanged(port, lifetime, changes)) releaseFollowSession(port, lifetime);
+				});
+				lifetime.observer.observe(element, { attributes: true, attributeFilter: ["data-conversation-session"], attributeOldValue: true });
+				// A route can detach and reconnect the same container without changing its
+				// id. Child-list delivery preserves that invalidation even in one task.
+				if (typeof document !== "undefined" && document.documentElement) lifetime.observer.observe(document.documentElement, { childList: true, subtree: true });
+			}
 			const activation = {};
 			followSessionActivations.set(port, activation);
 			queueMicrotask(() => {
@@ -314,16 +317,6 @@ const TURN_PROCESS_CLOCK = String.raw`
 			"@media (prefers-reduced-motion:reduce){.dsh-stream-think-highlight-body,.dsh-stream-think-highlight-list,.dsh-stream-think-highlight-chevron{transition:none}}",
 			// DSH 0.2 把 Think、正文和下一段工具过程拆成不同 flow 行；统一相邻视觉间距。
 			".I17U7q_body:has([data-variant=think]){gap:8px}",
-			"[data-step-process-content] > [data-chat-flow-kind]{--dsh-chat-flow-gap:8px!important}",
-			"[data-step-process]:has([data-variant=think]) + [data-chat-group-part=response]{--dsh-chat-flow-gap:8px!important}",
-			"[data-step-process]:has([data-variant=think]) + [data-chat-group-part=response] + :is([data-step-process],[data-chat-flow-kind=tool-call],[data-chat-flow-kind=assistant-step],[data-chat-running]){--dsh-chat-flow-gap:8px!important}",
-			"[data-variant=think] [data-disclosure-content]:not([data-collapsed]) > .I17U7q_thinkBody{padding-top:8px;padding-bottom:8px;scroll-padding-bottom:8px}",
-			"[data-step-process-body]:has([data-variant=think] [data-disclosure-content]:not([data-collapsed])){max-height:none;overflow:visible;mask-image:none;scrollbar-gutter:auto}",
-			".dsh-stream-think-summary{position:relative;display:block;flex:auto;min-width:0;height:24px;overflow:hidden;white-space:nowrap}",
-			".dsh-stream-think-summary-current{display:block;width:max-content;min-width:100%;height:24px;line-height:24px;white-space:nowrap}",
-			".dsh-stream-think-summary:not([data-follow-end]) .dsh-stream-think-summary-current{max-width:100%;overflow:hidden;text-overflow:ellipsis}",
-			".dsh-stream-think-summary-enter{animation:dsh-stream-think-summary-in .24s cubic-bezier(.2,.8,.2,1) both}",
-			".dsh-stream-think-summary-old{position:absolute;inset:0;height:24px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none;animation:dsh-stream-think-summary-out .24s cubic-bezier(.2,.8,.2,1) both}",
 			"[data-step-process] button[data-process-activity].dsh-stream-think-process-title{position:relative;min-width:0;max-width:100%;overflow:visible}",
 			".dsh-stream-think-process-title .dsh-stream-think-process-native{position:absolute;opacity:0;pointer-events:none}",
 			".dsh-stream-think-process-viewport{display:block;position:relative;flex:0 1 auto;min-width:0;height:1lh;overflow:hidden;pointer-events:none}",
@@ -363,84 +356,6 @@ const TURN_PROCESS_CLOCK = String.raw`
 			}
 			return changed;
 		}
-		/** DSH 0.2 renders the live clock in RunningStatus, outside turn-process. */
-		function installLiveRunningClock() {
-			if (typeof document === "undefined" || !document.body || typeof MutationObserver === "undefined") return () => {};
-			const attached = new Map();
-			const attach = (row) => {
-				if (attached.has(row)) return;
-				const content = row.lastElementChild;
-				const native = content?.lastElementChild;
-				if (!content || !native || native.nodeType !== 1) return;
-				// TextShimmer keeps a second decorative copy; read only its real text layer.
-				const source = native.firstElementChild ?? native;
-				const overlay = document.createElement("span");
-				overlay.className = "dsh-stream-think-live-overlay";
-				overlay.setAttribute("aria-hidden", "true");
-				let previous = "";
-				const render = () => {
-					const current = source.textContent ?? "";
-					if (current === previous) return;
-					const oldParts = clockLabelParts(previous);
-					const parts = clockLabelParts(current);
-					const animate = canAnimateClockChange(previous, current);
-					const fragment = document.createDocumentFragment();
-					for (let i = 0; i < parts.length; i++) {
-						const part = parts[i];
-						if (!animate || i % 2 === 0 || part === oldParts[i]) {
-							fragment.appendChild(document.createTextNode(part));
-							continue;
-						}
-						const digit = document.createElement("span");
-						digit.className = "dsh-stream-think-clock-number";
-						const old = document.createElement("span");
-						old.className = "dsh-stream-think-clock-old";
-						old.textContent = oldParts[i];
-						const next = document.createElement("span");
-						next.className = "dsh-stream-think-clock-next";
-						next.textContent = part;
-						digit.append(old, next);
-						fragment.appendChild(digit);
-					}
-					overlay.replaceChildren(fragment);
-					previous = current;
-				};
-				render();
-				content.classList.add("dsh-stream-think-live-content");
-				content.appendChild(overlay);
-				native.classList.add("dsh-stream-think-live-native");
-				const watcher = new MutationObserver(render);
-				watcher.observe(source, { characterData: true, childList: true, subtree: true });
-			attached.set(row, () => {
-				watcher.disconnect();
-				overlay.remove();
-				native.classList.remove("dsh-stream-think-live-native");
-				content.classList.remove("dsh-stream-think-live-content");
-			});
-			};
-			const scan = (node) => {
-				if (node.nodeType !== 1) return;
-				if (node.matches?.("[data-chat-running]")) attach(node);
-				for (const row of node.querySelectorAll?.("[data-chat-running]") ?? []) attach(row);
-			};
-			scan(document.body);
-			const watcher = new MutationObserver((changes) => {
-				let removed = false;
-				for (const change of changes) {
-					for (const node of change.addedNodes) scan(node);
-					if (change.removedNodes.length > 0) removed = true;
-				}
-				if (removed) for (const [row, detach] of attached) {
-					if (!row.isConnected) { detach(); attached.delete(row); }
-				}
-			});
-			watcher.observe(document.body, { childList: true, subtree: true });
-			return () => {
-				watcher.disconnect();
-				for (const detach of attached.values()) detach();
-				attached.clear();
-			};
-		}
 		function presentProcessTitle(title) {
 			const normalized = title.replace(/\s+/g, " ").trim();
 			const fence = normalized.search(/\x60{3}|~{3}/u);
@@ -451,121 +366,6 @@ const TURN_PROCESS_CLOCK = String.raw`
 			}
 			const chars = [...normalized];
 			return chars.length > 100 ? chars.slice(0, 99).join("").trimEnd() + "…" : normalized;
-		}
-		/** DSH 0.2 的「正在分析请求 · 细节」是原生过程组标题，不是 Think 行。 */
-		function installProcessTitleFlip(readMotionPreference) {
-			if (typeof document === "undefined" || !document.body || typeof MutationObserver === "undefined") return () => {};
-			const attached = new Map();
-			const selector = "[data-step-process] button[data-process-activity]";
-			const readTitle = (native) => {
-				const label = native.querySelector?.(".rwaBla_label") ?? native.querySelector?.('[class*="_label"]') ?? native;
-				const source = label.firstElementChild ?? label;
-				const text = (source.textContent ?? "").trim();
-				return presentProcessTitle(text !== "" ? text : (label.textContent ?? "").trim());
-			};
-			const reduced = () => {
-				const preference = readMotionPreference();
-				return preference === "force-reduced" || preference !== "force-smooth" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-			};
-			const attach = (button) => {
-				const native = button.children[1];
-				if (!native || native.nodeType !== 1 || native.classList.contains("dsh-stream-think-process-viewport")) {
-					attached.get(button)?.detach();
-					attached.delete(button);
-					return;
-				}
-				const prior = attached.get(button);
-				if (prior?.native === native) return;
-				prior?.detach();
-				attached.delete(button);
-				let presented = readTitle(native);
-				let desired = presented;
-				let lastChangeAt = -Infinity;
-				let flipActive = false;
-				const viewport = document.createElement("span");
-				viewport.className = "dsh-stream-think-process-viewport";
-				viewport.setAttribute("aria-hidden", "true");
-				const current = document.createElement("span");
-				current.className = "dsh-stream-think-process-label";
-				current.textContent = presented;
-				viewport.appendChild(current);
-				button.appendChild(viewport);
-				button.classList.add("dsh-stream-think-process-title");
-				native.classList.add("dsh-stream-think-process-native");
-				let oldLayer = null;
-				let incoming = null;
-				let outgoing = null;
-				const clearOld = () => { oldLayer?.remove(); oldLayer = null; };
-				const settleFlip = () => {
-					if (!flipActive) return;
-					flipActive = false;
-					clearOld();
-					if (desired !== presented) {
-						presented = desired;
-						current.textContent = desired;
-					}
-				};
-				const render = () => {
-					const next = readTitle(native);
-					if (next === "" || next === desired) return;
-					const now = performance.now();
-					const quiet = now - lastChangeAt >= 480;
-					lastChangeAt = now;
-					desired = next;
-					if (flipActive) return; // 这段动画跑完后直接显示期间收到的最新标题。
-					const old = presented;
-					presented = next;
-					current.textContent = next;
-					if (old === "" || reduced() || !quiet || typeof current.animate !== "function") return;
-					flipActive = true;
-					oldLayer = document.createElement("span");
-					oldLayer.className = "dsh-stream-think-process-label";
-					oldLayer.dataset.old = "";
-					oldLayer.textContent = old;
-					viewport.appendChild(oldLayer);
-					const layer = oldLayer;
-					outgoing = layer.animate([{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(100%)" }], { duration: 240, easing: "cubic-bezier(.2,.8,.2,1)" });
-					incoming = current.animate([{ opacity: 0, transform: "translateY(-100%)" }, { opacity: 1, transform: "translateY(0)" }], { duration: 240, easing: "cubic-bezier(.2,.8,.2,1)" });
-					incoming.onfinish = settleFlip;
-					incoming.oncancel = settleFlip;
-					outgoing.onfinish = () => { if (oldLayer === layer) clearOld(); };
-					outgoing.oncancel = () => { if (oldLayer === layer) clearOld(); };
-				};
-				const watcher = new MutationObserver(render);
-				watcher.observe(native, { childList: true, characterData: true, subtree: true });
-				attached.set(button, { native, detach: () => {
-					watcher.disconnect();
-					if (incoming) { incoming.onfinish = null; incoming.oncancel = null; }
-					incoming?.cancel();
-					outgoing?.cancel();
-					clearOld();
-					viewport.remove();
-					native.classList.remove("dsh-stream-think-process-native");
-					button.classList.remove("dsh-stream-think-process-title");
-				} });
-			};
-			const scan = (node) => {
-				if (node.nodeType !== 1) return;
-				if (node.matches?.(selector)) attach(node);
-				for (const button of [...(node.querySelectorAll?.(selector) ?? [])].slice(-12)) attach(button);
-			};
-			scan(document.body);
-			const watcher = new MutationObserver((changes) => {
-				let removed = false;
-				for (const change of changes) {
-					for (const node of change.addedNodes) scan(node);
-					if (change.removedNodes.length > 0) removed = true;
-					const button = change.target?.closest?.(selector);
-					if (button && attached.get(button)?.native !== button.children[1]) attach(button);
-				}
-				if (removed) for (const [button, entry] of attached) if (!button.isConnected) { entry.detach(); attached.delete(button); }
-			});
-			watcher.observe(document.body, { childList: true, subtree: true });
-			return () => {
-				watcher.disconnect();
-				for (const entry of attached.values()) entry.detach();
-				attached.clear();
-			};
 		}
 		function editPathsFromToolNode(node) {
 			if (node?.kind !== "tool-call") return [];
@@ -957,8 +757,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t//#region dsh-stream-think: 思考行展开设置（localStorage，不依赖 Host）',
   '\t\t/** 展开/收起/预览行数全部由本插件决定，改完立刻生效，不需要重启。 */',
   '\t\tconst THINK_SETTINGS_KEY = "dsh-stream-think:settings.v1";',
-  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, capLines: 24, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
-  '\t\tconst THINK_CAP_VAR = "--dsh-stream-think-cap-lines";',
+  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
   '\t\tconst thinkSettingsListeners = new Set();',
   '',
   '\t\tfunction readThinkSettings() {',
@@ -982,9 +781,6 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\t\tif (typeof parsed.showOtherTools === "boolean") out.showOtherTools = parsed.showOtherTools;',
   '\t\t\t\t\t\t// groupAutoExpand / toolSummary 已废弃：过程行注入会把思考盒带坏，不再读取',
   '\t\t\t\t\t\tif (typeof parsed.controlScroll === "boolean") out.controlScroll = parsed.controlScroll;',
-  '\t\t\t\t\t\tif (typeof parsed.capLines === "number" && isFinite(parsed.capLines) && parsed.capLines >= 0) {',
-  '\t\t\t\t\t\t\tout.capLines = Math.min(400, Math.floor(parsed.capLines));',
-  '\t\t\t\t\t\t}',
   '\t\t\t\t\t}',
   '\t\t\t\t}',
   '\t\t\t} catch (error) { /* 隐私模式 / 脏数据 → 默认值 */ }',
@@ -999,9 +795,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\treturn () => { thinkSettingsListeners.delete(cb); };',
   '\t\t}',
   '\t\tfunction applyThinkSettings() {',
-  '\t\t\tconst lines = thinkSettings.capLines === 0 ? 100000 : thinkSettings.capLines;',
   '\t\t\ttry {',
-  '\t\t\t\tdocument.documentElement.style.setProperty(THINK_CAP_VAR, String(lines));',
   '\t\t\t} catch (error) { /* 无 document：忽略 */ }',
   '\t\t\tfor (const cb of Array.from(thinkSettingsListeners)) {',
   '\t\t\t\ttry { cb(); } catch (error) { /* 单个订阅者出错不影响其它 */ }',
@@ -1060,42 +854,29 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\th("div", { className: "dsh-stream-think-set-name" }, name),',
   '\t\t\t\t\th("div", { className: "dsh-stream-think-set-meta" }, meta)),',
   '\t\t\t\tcontrol);',
-  '\t\t\tconst capOptions = [4, 12, 24, 48, 0];',
   '\t\t\treturn h("div", { className: "dsh-stream-think-set" },',
   '\t\t\t\th("div", { className: "dsh-stream-think-set-desc" },',
   '\t\t\t\t\t"勾选的类别会直接出现在对话中，各类独立合并，点击标题展开；原生过程组的折叠不影响这些分类。修改立即生效并保存在本机。"),',
   '\t\t\t\trow("autoExpand", "生成时自动展开 Think",',
   '\t\t\t\t\ts.autoExpand',
-  '\t\t\t\t\t\t? "模型推理时展开该条 Think；关闭后未手动操作的当前 Think 会收起（默认）"',
+  '\t\t\t\t\t\t? "模型推理时展开该条 Think（默认）"',
   '\t\t\t\t\t\t: "已关闭：当前 Think 收起，需要时手动点开",',
   '\t\t\t\t\tswitchBtn(s.autoExpand, "生成时自动展开 Think", "stream-think-auto-expand",',
   '\t\t\t\t\t\t() => updateThinkSettings({ autoExpand: !s.autoExpand }))),',
   '\t\t\t\trow("autoCollapse", "单段推理结束后收起 Think",',
   '\t\t\t\t\t!s.autoExpand',
-  '\t\t\t\t\t\t? "自动展开已关闭；手动展开的 Think 不会被自动收起"',
+  '\t\t\t\t\t\t? "自动展开已关闭；推理中手动展开的会在这段结束后收起"',
   '\t\t\t\t\t\t: s.autoCollapse',
   '\t\t\t\t\t\t\t? "该条 Think 结束后收起，不控制外层过程组（默认）"',
   '\t\t\t\t\t\t\t: "已关闭：Think 内层保持展开；整轮结束后可从过程组查看",',
   '\t\t\t\t\tswitchBtn(s.autoCollapse, "单段推理结束后收起 Think", "stream-think-auto-collapse",',
   '\t\t\t\t\t\t() => updateThinkSettings({ autoCollapse: !s.autoCollapse }))),',
-  '\t\t\t\trow("controlScroll", "流式跟随（滚动动画）",',
+  '\t\t\t\trow("controlScroll", "跟随动画",',
   '\t\t\t\t\ts.controlScroll',
-  '\t\t\t\t\t\t? "外层会话随输出平滑跟随；手动上翻即暂停（默认）"',
-  '\t\t\t\t\t\t: "已关闭：外层会话滚动交还 DSH；Think 框和过程组仍可独立滚动",',
-  '\t\t\t\t\tswitchBtn(s.controlScroll, "流式跟随", "stream-think-control-scroll",',
+  '\t\t\t\t\t\t? "平滑：逐帧追到底部；手动上翻即暂停（默认）"',
+  '\t\t\t\t\t\t: "瞬时：内容一变就直接落到底，不播放平滑追赶",',
+  '\t\t\t\t\tswitchBtn(s.controlScroll, "平滑跟随动画", "stream-think-control-scroll",',
   '\t\t\t\t\t\t() => updateThinkSettings({ controlScroll: !s.controlScroll }))),',
-  '\t\t\t\trow("capLines", "展开时的预览行数",',
-  '\t\t\t\t\ts.capLines === 0',
-  '\t\t\t\t\t\t? "不限制：整段推理全部铺开，长推理会把会话顶下去"',
-  '\t\t\t\t\t\t: "最多显示 " + s.capLines + " 行，超出部分在框内滚动",',
-  '\t\t\t\t\th("div", { className: "dsh-stream-think-set-seg" },',
-  '\t\t\t\t\t\tcapOptions.map((v) => h("button", {',
-  '\t\t\t\t\t\t\ttype: "button",',
-  '\t\t\t\t\t\t\tkey: v,',
-  '\t\t\t\t\t\t\t"data-on": String(s.capLines === v),',
-  '\t\t\t\t\t\t\t"data-testid": "stream-think-cap-" + v,',
-  '\t\t\t\t\t\t\tonClick: () => updateThinkSettings({ capLines: v })',
-  '\t\t\t\t\t\t}, v === 0 ? "不限" : v + " 行")))),',
   '\t\t\t\th("div", { className: "dsh-stream-think-set-heading" }, "直接显示在对话中"),',
   '\t\t\t\trow("showTaskUpdates", "任务清单", "显示最近一次有效清单及更新次数（默认）",',
   '\t\t\t\t\tswitchBtn(s.showTaskUpdates, "在对话中显示任务清单", "stream-think-show-task-updates", () => updateThinkSettings({ showTaskUpdates: !s.showTaskUpdates }))),',
@@ -1119,18 +900,6 @@ const THINK_SETTINGS_BLOCK = [
 ].join('\n')
 
 /** 预览限高的 CSS：挂在 grid 子元素上（挂 grid 容器会让 1fr 轨道塌陷）。 */
-const THINK_CAP_CSS = [
-  '.I17U7q_thinkBody[data-think-cap]{',
-  'box-sizing:border-box;',
-  'padding-bottom:16px;scroll-padding-bottom:16px;',
-  'overflow-y:auto;overflow-x:hidden;overscroll-behavior:auto;',
-  '}',
-  '.I17U7q_disclosureContent>.I17U7q_thinkBody{transition:padding-top var(--ds-transition-duration,.2s) var(--ds-ease-in-out,cubic-bezier(.4,0,.2,1)),padding-bottom var(--ds-transition-duration,.2s) var(--ds-ease-in-out,cubic-bezier(.4,0,.2,1))}',
-  '.I17U7q_disclosureContent[data-collapsed]>.I17U7q_thinkBody{padding-top:0;padding-bottom:0;overflow:hidden}',
-  '.I17U7q_disclosureContent[data-no-transition]>.I17U7q_thinkBody{transition:none}',
-  '@media(prefers-reduced-motion:reduce){.I17U7q_disclosureContent>.I17U7q_thinkBody{transition:none}}',
-  '.I17U7q_thinkBody[data-think-cap]::-webkit-scrollbar{width:6px}',
-].join('')
 
 /** Remove upstream controls whose values no longer drive runtime behavior. */
 function removeUpstreamCardField(source, key) {
@@ -1168,12 +937,6 @@ function patchClient(source) {
 
   // 原生过程计时不是流式正文：绕开逐字器，单独给每秒变化的数字做过渡。
   out = swap(out, 'client/turn-process-clock-insert', '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {', TURN_PROCESS_CLOCK + '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {')
-  out = swap(out, 'client/live-clock-start', '\t\t\tconst restores = [];', '\t\t\tconst restores = [];\n\t\t\tconst detachLiveRunningClock = installLiveRunningClock();')
-  out = swap(out, 'client/live-clock-stop', '\t\t\t\tfor (const restore of restores) restore();', '\t\t\t\tdetachLiveRunningClock();\n\t\t\t\tfor (const restore of restores) restore();')
-  out = swap(out, 'client/process-title-motion-source', '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {', '\t\tfunction wrapAgentChatRows(ctx, useControlScroll, readMotionPreference) {')
-  out = swap(out, 'client/process-title-start', '\t\t\tconst detachLiveRunningClock = installLiveRunningClock();', '\t\t\tconst detachLiveRunningClock = installLiveRunningClock();\n\t\t\tconst detachProcessTitleFlip = installProcessTitleFlip(readMotionPreference);')
-  out = swap(out, 'client/process-title-stop', '\t\t\t\tdetachLiveRunningClock();', '\t\t\t\tdetachProcessTitleFlip();\n\t\t\t\tdetachLiveRunningClock();')
-  out = swap(out, 'client/process-title-call', 'const unwrap = wrapAgentChatRows(ctx, useControlScroll);', 'const unwrap = wrapAgentChatRows(ctx, useControlScroll, () => settings.getSnapshot().motionPreference);')
   out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : wrapFollowNodeView(key === "command" ? wrapBtwCommandNodeView(inner) : inner, useControlScroll);')
   out = swap(
     out,
@@ -1260,7 +1023,7 @@ function patchClient(source) {
     out,
     'client/reasoning-props',
     'function AnimatedReasoning({ text, running, preset, thinkAutoExpand, motionReduced,',
-    'function AnimatedReasoning({ text, running, preset, thinkAutoExpand, thinkAutoCollapse, thinkCapLines, motionReduced,',
+    'function AnimatedReasoning({ text, running, preset, thinkAutoExpand, thinkAutoCollapse, motionReduced,',
   )
   out = swap(
     out,
@@ -1270,7 +1033,7 @@ function patchClient(source) {
       '\t\t\tconst summaryRef = (0, react.useRef)(null);',
     ].join('\n'),
     [
-      '\t\t\t/* 读者一旦亲手开合过这一行，自动逻辑就永久放手（think-ux 的语义）。 */',
+      '\t\t\t/* 只有「这段推理已结束」之后的手动操作才接管这一行；推理中的手动展开仍会在本段结束时被收起。 */',
       '\t\t\tconst userToggledRef = (0, react.useRef)(false);',
       '\t\t\tconst wasRunningRef = (0, react.useRef)(running);',
       '\t\t\tconst previousAutoCollapseRef = (0, react.useRef)(thinkAutoCollapse);',
@@ -1323,153 +1086,23 @@ function patchClient(source) {
     ].join('\n'),
     [
       '\t\t\t\t\t\tonToggle: () => {',
-      '\t\t\t\t\t\t\tuserToggledRef.current = true;',
+      '\t\t\t\t\t\t\t/* 推理中的手动展开不设豁免：本段结束照样按设置收起；已完成的思考点开后才交给读者。 */',
+      '\t\t\t\t\t\t\tif (!running) userToggledRef.current = true;',
       '\t\t\t\t\t\t\tsetExpanded((value) => !value);',
       '\t\t\t\t\t\t},',
     ].join('\n'),
   )
   out = swap(out, 'client/animate-auto-collapse', 'bodyTransition: !autoClosed,', 'bodyTransition: !reduced,')
 
-  // 修复 3：限高预览 + 流式时跟随到框底
-  out = swap(
-    out,
-    'client/reasoning-cap-attr',
-    [
-      '\t\t\t\t\t\tchildren: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {',
-      '\t\t\t\t\t\t\tref: fadeRootRef,',
-      '\t\t\t\t\t\t\tclassName: TypewriterAssistantNodeView_module_css_default.thinkBody,',
-      '\t\t\t\t\t\t\tchildren: shown',
-      '\t\t\t\t\t\t})',
-    ].join('\n'),
-    [
-      '\t\t\t\t\t\tchildren: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {',
-      '\t\t\t\t\t\t\tref: fadeRootRef,',
-      '\t\t\t\t\t\t\tclassName: TypewriterAssistantNodeView_module_css_default.thinkBody,',
-      '\t\t\t\t\t\t\t"data-think-cap": thinkCapLines > 0 ? "" : void 0,',
-      '\t\t\t\t\t\t\tchildren: shown',
-      '\t\t\t\t\t\t})',
-    ].join('\n'),
-  )
-  out = swap(
-    out,
-    'client/reasoning-cap-follow',
-    [
-      '\t\t\t(0, react.useEffect)(() => {',
-      '\t\t\t\tconst element = summaryRef.current;',
-      '\t\t\t\tif (element === null) return;',
-      '\t\t\t\telement.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0;',
-      '\t\t\t}, [running, summary]);',
-    ].join('\n'),
-    [
-      '\t\t\t(0, react.useEffect)(() => {',
-      '\t\t\t\tconst element = summaryRef.current;',
-      '\t\t\t\tif (element === null) return;',
-      '\t\t\t\telement.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0;',
-      '\t\t\t}, [running, summary]);',
-      '\t\t\t/* 按实际行高计算预览高度：字体缩放时 12 行仍然是完整的 12 行。 */',
-      '\t\t\t(0, react.useLayoutEffect)(() => {',
-      '\t\t\t\tconst element = fadeRootRef.current;',
-      '\t\t\t\tif (element === null) return;',
-      '\t\t\t\tconst resize = () => {',
-      '\t\t\t\t\tconst lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight) || 24;',
-      '\t\t\t\t\tconst height = thinkCapLines > 0 ? Math.ceil(lineHeight * thinkCapLines + 16) + "px" : "";',
-      '\t\t\t\t\tif (element.style.maxHeight !== height) element.style.maxHeight = height;',
-      '\t\t\t\t};',
-      '\t\t\t\tresize();',
-      '\t\t\t\tconst observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);',
-      '\t\t\t\tobserver?.observe(element);',
-      '\t\t\t\treturn () => observer?.disconnect();',
-      '\t\t\t}, [thinkCapLines]);',
-      '\t\t\t/* 限高预览：只在读者仍贴底时跟随；最终一块文本也要滚到真实底部。 */',
-      '\t\t\t(0, react.useLayoutEffect)(() => {',
-      '\t\t\t\tconst element = fadeRootRef.current;',
-      '\t\t\t\tconst justFinished = lastRunningForScrollRef.current && !running;',
-      '\t\t\t\tlastRunningForScrollRef.current = running;',
-      '\t\t\t\tif (element !== null && thinkCapLines > 0 && followThinkBodyRef.current && (running || justFinished)) element.scrollTop = element.scrollHeight - element.clientHeight;',
-      '\t\t\t}, [running, shown, thinkCapLines, expanded]);',
-      '\t\t\t(0, react.useEffect)(() => {',
-      '\t\t\t\tconst element = fadeRootRef.current;',
-      '\t\t\t\tif (element === null) return;',
-      '\t\t\t\tlet previousTop = element.scrollTop;',
-      '\t\t\t\tconst track = () => {',
-      '\t\t\t\t\tconst gap = element.scrollHeight - element.scrollTop - element.clientHeight;',
-      '\t\t\t\t\tif (element.scrollTop < previousTop - 0.5) followThinkBodyRef.current = false;',
-      '\t\t\t\t\telse if (element.scrollTop > previousTop + 0.5 && gap <= 2) followThinkBodyRef.current = true;',
-      '\t\t\t\t\tpreviousTop = element.scrollTop;',
-      '\t\t\t\t};',
-      '\t\t\t\tconst stop = (event) => {',
-      '\t\t\t\t\tif (element.scrollHeight <= element.clientHeight + 1) return;',
-      '\t\t\t\t\tif (event.deltaY < 0) followThinkBodyRef.current = false;',
-      '\t\t\t\t\tconst atTop = element.scrollTop <= 1 && event.deltaY < 0;',
-      '\t\t\t\t\tconst atBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 1 && event.deltaY > 0;',
-      '\t\t\t\t\tif (!atTop && !atBottom) event.stopPropagation();',
-      '\t\t\t\t};',
-      '\t\t\t\tconst observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {',
-      '\t\t\t\t\tif (running && followThinkBodyRef.current) element.scrollTop = element.scrollHeight - element.clientHeight;',
-      '\t\t\t\t});',
-      '\t\t\t\tobserver?.observe(element);',
-      '\t\t\t\telement.addEventListener("scroll", track, { passive: true });',
-      '\t\t\t\telement.addEventListener("wheel", stop, { passive: true });',
-      '\t\t\t\treturn () => { observer?.disconnect(); element.removeEventListener("scroll", track); element.removeEventListener("wheel", stop); };',
-      '\t\t\t}, [thinkCapLines, running]);',
-    ].join('\n'),
-  )
-
-  // Think 摘要切到有信息量的新句时在固定高度内交叠翻页；结算沿用同一选择规则。
-  out = swap(out, 'client/rolling-summary-insert', '\t\tfunction AnimatedReasoning({', ROLLING_THINK_SUMMARY + '\t\tfunction AnimatedReasoning({')
-  out = swap(
-    out,
-    'client/rolling-summary-source',
-    '\t\t\tconst summary = running ? latestLine(shown) : firstLine(text);',
-    '\t\t\tconst thoughtSummary = selectThoughtSummary(shown);\n\t\t\tconst summary = thoughtSummary.text;\n\t\t\tconst summaryLine = thoughtSummary.line;',
-  )
-  out = swap(
-    out,
-    'client/rolling-summary-render',
-    [
-      '\t\t\t\t\t\t}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
-      '\t\t\t\t\t\t\tref: summaryRef,',
-      '\t\t\t\t\t\t\tclassName: TypewriterAssistantNodeView_module_css_default.thinkSummary,',
-      '\t\t\t\t\t\t\t"data-follow-end": running || void 0,',
-      '\t\t\t\t\t\t\tchildren: summary',
-      '\t\t\t\t\t\t})] }),',
-    ].join('\n'),
-    [
-      '\t\t\t\t\t\t}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(RollingThinkSummary, {',
-      '\t\t\t\t\t\t\ttext: summary,',
-      '\t\t\t\t\t\t\tline: summaryLine,',
-      '\t\t\t\t\t\t\tfollowEnd: running && thoughtSummary.followEnd,',
-      '\t\t\t\t\t\t\treduced',
-      '\t\t\t\t\t\t})] }),',
-    ].join('\n'),
-  )
-  out = swap(
-    out,
-    'client/rolling-summary-hide-empty',
-    '\t\t\t\t\t\tcollapsedContent: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [',
-    '\t\t\t\t\t\tcollapsedContent: summary === "" ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [',
-  )
-  out = swap(out, 'client/rolling-summary-ref', '\t\t\tconst summaryRef = (0, react.useRef)(null);\n', '')
-  out = swap(
-    out,
-    'client/rolling-summary-scroll',
-    [
-      '\t\t\t(0, react.useEffect)(() => {',
-      '\t\t\t\tconst element = summaryRef.current;',
-      '\t\t\t\tif (element === null) return;',
-      '\t\t\t\telement.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0;',
-      '\t\t\t}, [running, summary]);',
-      '',
-    ].join('\n'),
-    '',
-  )
+  // 八类摘要里的「思考摘录」类目依赖这个选句函数（行内摘录组件已移除）。
+  out = swap(out, 'client/thought-summary-picker-insert', '\t\tfunction AnimatedReasoning({', THOUGHT_SUMMARY_PICKER + '\t\tfunction AnimatedReasoning({')
 
   // 组件签名与调用点补上新 props
   out = swap(
     out,
     'client/nodeview-defaults',
     'thinkAutoExpand = DEFAULT_STREAM_SETTINGS.thinkAutoExpand, logarithmicFade = DEFAULT_STREAM_SETTINGS.logarithmicFade,',
-    'thinkAutoExpand = DEFAULT_STREAM_SETTINGS.thinkAutoExpand, thinkAutoCollapse = true, thinkCapLines = 24, logarithmicFade = DEFAULT_STREAM_SETTINGS.logarithmicFade,',
+    'thinkAutoExpand = DEFAULT_STREAM_SETTINGS.thinkAutoExpand, thinkAutoCollapse = true, logarithmicFade = DEFAULT_STREAM_SETTINGS.logarithmicFade,',
   )
   out = swap(
     out,
@@ -1484,7 +1117,6 @@ function patchClient(source) {
       '\t\t\t\t\t\t\t\tpreset,',
       '\t\t\t\t\t\t\t\tthinkAutoExpand,',
       '\t\t\t\t\t\t\t\tthinkAutoCollapse,',
-      '\t\t\t\t\t\t\t\tthinkCapLines,',
     ].join('\n'),
   )
 
@@ -1590,8 +1222,29 @@ function patchClient(source) {
   out = swap(out, 'client/session-pad-clear', '\t\t\t\t\tflow.style.paddingBottom = existing.original;', '\t\t\t\t\texisting.element.style.paddingBottom = existing.original;')
 
   out = swap(out, 'client/session-follow-helper', '\t\tfunction useConversationFollow(rootRef, active,', FOLLOW_SESSION_ISOLATION + '\t\tfunction useConversationFollow(rootRef, active,')
-  out = swap(out, 'client/session-follow-owner', '\t\t\t\tlet port = null;\n\t\t\t\tlet resize = null;', '\t\t\t\tlet port = null;\n\t\t\t\tlet boundSession = null;\n\t\t\t\tconst isOriginalSession = (element) => boundSession === null || followSessionOf(element) === boundSession;\n\t\t\t\tlet resize = null;')
+  out = swap(out, 'client/session-follow-owner', '\t\t\t\tlet port = null;\n\t\t\t\tlet resize = null;', '\t\t\t\tlet port = null;\n\t\t\t\tlet boundSession = null;\n\t\t\t\tlet boundLifetime = null;\n\t\t\t\tlet stopHandoff = null;\n\t\t\t\tlet settleRafId = 0;\n\t\t\t\tconst isOriginalSession = (element) => (boundLifetime === null || currentFollowSessionLifetime(element) === boundLifetime) && element.isConnected !== false && (boundSession === null || followSessionOf(element) === boundSession);\n\t\t\t\tlet resize = null;')
+  out = swap(out, 'client/session-follow-leader', '\t\t\t\tconst isLeader = (next) => followLeaders.get(next)?.owner === owner;', '\t\t\t\tconst isLeader = (next) => isOriginalSession(next) && followLeaders.get(next)?.owner === owner;')
+  out = swap(out, 'client/session-follow-cancel-owner', '\t\t\t\t\t\t\towner\n\t\t\t\t\t\t});', '\t\t\t\t\t\t\towner,\n\t\t\t\t\t\t\tcancel: () => stopSessionWork()\n\t\t\t\t\t\t});')
+  out = swap(out, 'client/session-follow-cancel-work', '\t\t\t\t\tif (tail !== null) resize.observe(tail);\n\t\t\t\t};\n\t\t\t\tconst frame = (now) => {', [
+    '\t\t\t\t\tif (tail !== null) resize.observe(tail);',
+    '\t\t\t\t};',
+    '\t\t\t\tconst stopSessionWork = () => {',
+    '\t\t\t\t\tcancelAnimationFrame(rafId);',
+    '\t\t\t\t\tcancelAnimationFrame(settleRafId);',
+    '\t\t\t\t\tstopHandoff?.();',
+    '\t\t\t\t\tstopHandoff = null;',
+    '\t\t\t\t\tunsubscribeCommit?.();',
+    '\t\t\t\t\tresize?.disconnect();',
+    '\t\t\t\t\tmutations?.disconnect();',
+    '\t\t\t\t\tif (port !== null) for (const name of GESTURE_EVENTS) port.removeEventListener(name, markGesture);',
+    '\t\t\t\t\tif (interactTimer !== null) clearTimeout(interactTimer);',
+    '\t\t\t\t\tinteractTimer = null;',
+    '\t\t\t\t\treleaseRevealScale();',
+    '\t\t\t\t};',
+    '\t\t\t\tconst frame = (now) => {',
+  ].join('\n'))
   out = swap(out, 'client/session-follow-observer', '\t\t\t\tconst restoreBeforePaint = () => {\n\t\t\t\t\tif (!following || port === null) return;', '\t\t\t\tconst restoreBeforePaint = () => {\n\t\t\t\t\tif (!following || port === null || !isOriginalSession(port)) return;')
+  out = swap(out, 'client/reader-prepaint-ownership', '\t\t\t\t\tif (!following || port === null || !isOriginalSession(port)) return;', '\t\t\t\t\tif (!following || port === null || !isOriginalSession(port)) return;\n\t\t\t\t\tif (interacting && (readerGestureIntent || readerScrolledUp(port))) return; // 原生先处理读者滚动，下一帧交还跟随。')
   out = swap(
     out,
     'client/follow-observe-composer',
@@ -1602,10 +1255,10 @@ function patchClient(source) {
     out,
     'client/session-follow-adopt',
     '\t\t\t\t\tconst nextPort = root.closest("[data-conversation-scroll]");\n\t\t\t\t\tif (nextPort === null) return;\n\t\t\t\t\tbindPort(nextPort);',
-    '\t\t\t\t\tconst nextPort = root.closest("[data-conversation-scroll]");\n\t\t\t\t\tif (nextPort === null) return;\n\t\t\t\t\tconst currentSession = followSessionOf(root);\n\t\t\t\t\tif (currentSession === null) return;\n\t\t\t\t\tif (boundSession === null) boundSession = currentSession;\n\t\t\t\t\telse if (boundSession !== currentSession) return;\n\t\t\t\t\tisolateFollowSession(nextPort, root);\n\t\t\t\t\tif (followSessionActivations.has(nextPort)) return; // 等宿主恢复该会话的阅读位置后再接管。\n\t\t\t\t\tbindPort(nextPort);',
+    '\t\t\t\t\tconst nextPort = root.closest("[data-conversation-scroll]");\n\t\t\t\t\tif (nextPort === null) return;\n\t\t\t\t\tconst currentSession = followSessionOf(root);\n\t\t\t\t\tif (currentSession === null) return;\n\t\t\t\t\tif (!isOriginalSession(nextPort)) { stopSessionWork(); return; }\n\t\t\t\t\tif (boundSession === null) boundSession = currentSession;\n\t\t\t\t\tisolateFollowSession(nextPort, root);\n\t\t\t\t\tboundLifetime ??= currentFollowSessionLifetime(nextPort);\n\t\t\t\t\tif (entrancePending && isFollowSessionEntryRow(root)) finishEntrance();\n\t\t\t\t\tif (followSessionActivations.has(nextPort)) return; // 等宿主恢复该会话的阅读位置后再接管。\n\t\t\t\t\tbindPort(nextPort);',
   )
-  out = swap(out, 'client/session-follow-cleanup', '\t\t\t\t\tif (host === null) return;\n\t\t\t\t\tholding = null;\n\t\t\t\t\tif (!isLeader(host)) return;', '\t\t\t\t\tif (host === null) return;\n\t\t\t\t\tholding = null;\n\t\t\t\t\tif (!isOriginalSession(host)) {\n\t\t\t\t\t\tisolateFollowSession(host, host);\n\t\t\t\t\t\treleaseRevealScale();\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tif (!isLeader(host)) return;')
-  out = swap(out, 'client/session-follow-disabled-cleanup', '\t\t\t\t\t\tif (disabledHost !== null) {\n\t\t\t\t\t\t\tclearVisual(disabledHost);', '\t\t\t\t\t\tif (disabledHost !== null && !isOriginalSession(disabledHost)) isolateFollowSession(disabledHost, disabledHost);\n\t\t\t\t\t\telse if (disabledHost !== null) {\n\t\t\t\t\t\t\tclearVisual(disabledHost);')
+  out = swap(out, 'client/session-follow-cleanup', '\t\t\t\t\tif (host === null) return;\n\t\t\t\t\tholding = null;\n\t\t\t\t\tif (!isLeader(host)) return;', '\t\t\t\t\tif (host === null) return;\n\t\t\t\t\tholding = null;\n\t\t\t\t\tif (!isOriginalSession(host)) {\n\t\t\t\t\t\tstopSessionWork();\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tif (!isLeader(host)) return;')
+  out = swap(out, 'client/session-follow-disabled-cleanup', '\t\t\t\t\t\tif (disabledHost !== null) {\n\t\t\t\t\t\t\tclearVisual(disabledHost);', '\t\t\t\t\t\tif (disabledHost !== null && !isOriginalSession(disabledHost)) stopSessionWork();\n\t\t\t\t\t\telse if (disabledHost !== null) {\n\t\t\t\t\t\t\tclearVisual(disabledHost);')
 
   // Returning to an already-running conversation is not a new-content entrance.
   // A fresh reserve moves physical bottom before a single new character arrives;
@@ -1617,10 +1270,7 @@ function patchClient(source) {
     '\t\tfunction readerScrolledUp(port) {\n\t\t\treturn port.scrollTop < (followScrollLedgers.get(port) ?? 0) - 8;\n\t\t}',
     '\t\tfunction readerScrolledUp(port) {\n\t\t\tconst floor = Math.max(0, port.scrollHeight - port.clientHeight);\n\t\t\tconst previousTop = Math.min(followScrollLedgers.get(port) ?? 0, floor);\n\t\t\treturn port.scrollTop < previousTop - 8;\n\t\t}')
   out = swap(out, 'client/resume-growth-state', '\t\t\t\tlet primed = false;', '\t\t\t\tlet primed = false;\n\t\t\t\tlet waitingForContentGrowth = false;\n\t\t\t\tlet resumedContentHeight = 0;')
-  out = swap(out, 'client/resume-no-history-entrance',
-    '\t\t\t\t\t\tconst inherited = nextPort.hasAttribute(FOLLOW_OWNED_ATTR) ? followMotionStates.get(nextPort) : void 0;',
-    '\t\t\t\t\t\tif (entrancePending && followSessionEntryRows.has(root.closest("[data-chat-flow-key]"))) finishEntrance();\n\t\t\t\t\t\tconst inherited = nextPort.hasAttribute(FOLLOW_OWNED_ATTR) ? followMotionStates.get(nextPort) : void 0;')
-  out = swap(out, 'client/resume-no-history-text-replay', '\t\t\t\tvisit(root, revealInitial);', '\t\t\t\tvisit(root, revealInitial && !followSessionEntryRows.has(root.closest("[data-chat-flow-key]")));')
+  out = swap(out, 'client/resume-no-history-text-replay', '\t\t\t\tvisit(root, revealInitial);', '\t\t\t\tvisit(root, revealInitial && !isFollowSessionEntryRow(root));')
   out = swap(out, 'client/resume-no-synthetic-reserve',
     '\t\t\t\t\t\t\treservePx = Math.max(ownedBottomSpaceOf(nextPort), predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);',
     '\t\t\t\t\t\t\twaitingForContentGrowth = !entrancePending;\n\t\t\t\t\t\t\treservePx = Math.max(ownedBottomSpaceOf(nextPort), !waitingForContentGrowth && predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);')
@@ -1636,6 +1286,7 @@ function patchClient(source) {
 
   // 旧行结束后等待实际接管或本轮结束；固定 260ms 在工具切换稍慢时仍会清空预留并跳底。
   out = swap(out, 'client/follow-handoff-helper', '\t\tfunction useConversationFollow(rootRef, active,', FOLLOW_HANDOFF + '\t\tfunction useConversationFollow(rootRef, active,')
+  out = swap(out, 'client/session-handoff-timer-guard', 'if (endTimer === null) endTimer = setTimeout(() => { stop(); finish(); }, 180);', 'if (endTimer === null) endTimer = setTimeout(() => { stop(); if (isLeader()) finish(); }, 180);')
   out = swap(
     out,
     'client/follow-handoff-grace',
@@ -1676,12 +1327,34 @@ function patchClient(source) {
       '\t\t\t\t\t\t\treleaseRevealScale();',
       '\t\t\t\t\t\t\tdebugRuntime.reportFollow(host, null);',
       '\t\t\t\t\t\t};',
-      '\t\t\t\t\t\tif (turnStatusOf(host) !== null) waitForFollowHandoff(host, () => isLeader(host), () => controlScrollRef.current, finishInactive);',
+      '\t\t\t\t\t\tif (turnStatusOf(host) !== null) waitForFollowHandoff(host, () => isLeader(host), () => true, finishInactive);',
       '\t\t\t\t\t\telse finishInactive();',
       '\t\t\t\t\t\treturn;',
       '\t\t\t\t\t}',
     ].join('\n'),
   )
+  out = swap(out, 'client/session-handoff-cancel', 'if (turnStatusOf(host) !== null) waitForFollowHandoff(host, () => isLeader(host), () => true, finishInactive);', 'if (turnStatusOf(host) !== null) stopHandoff = waitForFollowHandoff(host, () => isLeader(host), () => true, finishInactive);')
+  // controlScroll 语义收窄为「跟随动画」：跟随始终由本插件执行，开关只切平滑 / 瞬时。
+  out = swap(
+    out,
+    'client/animation-only-switch',
+    '\t\t\t(0, react.useLayoutEffect)(() => {\n\t\t\t\tif (!controlScroll) return;\n\t\t\t\tif (!active) return;',
+    '\t\t\t(0, react.useLayoutEffect)(() => {\n\t\t\t\t/* dsh-stream-think：controlScroll 只表示「跟随动画」。跟随始终由本插件执行，\n\t\t\t\t * 关闭时帧循环走瞬时落底分支（client/instant-follow-mode），不再把滚动交回宿主。 */\n\t\t\t\tif (!active) return;',
+  )
+  out = swap(
+    out,
+    'client/instant-follow-mode',
+    '\t\t\t\t\t\tconst lag = Math.max(0, contentHeight - animatedH - runwayOffset);\n\t\t\t\t\t\tconst step = computeFollowStep(dt, {\n\t\t\t\t\t\t\tlag,\n\t\t\t\t\t\t\tspeedEma: speedCpsRef.current,\n\t\t\t\t\t\t\tvelocityPxPerSec\n\t\t\t\t\t\t}, tuning);\n\t\t\t\t\t\tif (lag <= .1) {\n\t\t\t\t\t\t\tanimatedH = contentHeight - runwayOffset;\n\t\t\t\t\t\t\tvelocityPxPerSec = 0;\n\t\t\t\t\t\t} else {\n\t\t\t\t\t\t\tanimatedH = Math.min(contentHeight - runwayOffset, animatedH + step.advancePx);\n\t\t\t\t\t\t\tvelocityPxPerSec = step.velocityPxPerSec;\n\t\t\t\t\t\t}',
+    '\t\t\t\t\t\tconst lag = Math.max(0, contentHeight - animatedH - runwayOffset);\n\t\t\t\t\t\tif (!controlScrollRef.current) {\n\t\t\t\t\t\t\t/* 动画关闭：不按速度追赶，直接落到当前底（瞬时跟随）。 */\n\t\t\t\t\t\t\tanimatedH = contentHeight - runwayOffset;\n\t\t\t\t\t\t\tvelocityPxPerSec = 0;\n\t\t\t\t\t\t} else {\n\t\t\t\t\t\t\tconst step = computeFollowStep(dt, {\n\t\t\t\t\t\t\t\tlag,\n\t\t\t\t\t\t\t\tspeedEma: speedCpsRef.current,\n\t\t\t\t\t\t\t\tvelocityPxPerSec\n\t\t\t\t\t\t\t}, tuning);\n\t\t\t\t\t\t\tif (lag <= .1) {\n\t\t\t\t\t\t\t\tanimatedH = contentHeight - runwayOffset;\n\t\t\t\t\t\t\t\tvelocityPxPerSec = 0;\n\t\t\t\t\t\t\t} else {\n\t\t\t\t\t\t\t\tanimatedH = Math.min(contentHeight - runwayOffset, animatedH + step.advancePx);\n\t\t\t\t\t\t\t\tvelocityPxPerSec = step.velocityPxPerSec;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}',
+  )
+  out = swap(
+    out,
+    'client/instant-no-runway',
+    'reservePx = Math.max(ownedBottomSpaceOf(nextPort), !waitingForContentGrowth && predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);',
+    'reservePx = controlScrollRef.current ? Math.max(ownedBottomSpaceOf(nextPort), !waitingForContentGrowth && predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0) : 0;',
+  )
+  out = swap(out, 'client/session-settle-cancel-frame', '\t\t\t\t\t\trequestAnimationFrame(settleFrame);', '\t\t\t\t\t\tsettleRafId = requestAnimationFrame(settleFrame);')
+  out = swap(out, 'client/session-settle-cancel-start', '\t\t\t\t\trequestAnimationFrame(settleFrame);', '\t\t\t\t\tsettleRafId = requestAnimationFrame(settleFrame);')
 
 
   // 诊断：把过程组的开合也投影到 DOM（验证 A 生效与否用，零视觉影响）
@@ -1709,7 +1382,7 @@ function patchClient(source) {
       '\t\t\t\t\tclassName: TypewriterAssistantNodeView_module_css_default.think,',
       '\t\t\t\t\t"data-variant": "think",',
       '\t\t\t\t\t"data-state": running ? "running" : "ok",',
-      '\t\t\t\t\t"aria-label": "think live=" + (running ? "1" : "0") + " auto=" + (thinkAutoExpand ? "1" : "0") + " open=" + (expanded ? "1" : "0") + " cap=" + thinkCapLines,',
+      '\t\t\t\t\t"aria-label": "think live=" + (running ? "1" : "0") + " auto=" + (thinkAutoExpand ? "1" : "0") + " open=" + (expanded ? "1" : "0"),',
     ].join('\n'),
   )
 
@@ -1742,7 +1415,6 @@ function patchClient(source) {
     [
       '\t\t\t\t\tthinkAutoExpand: thinkPrefs.autoExpand,',
       '\t\t\t\t\tthinkAutoCollapse: thinkPrefs.autoCollapse,',
-      '\t\t\t\t\tthinkCapLines: thinkPrefs.capLines,',
     ].join('\n'),
   )
 
@@ -1782,14 +1454,6 @@ function patchClient(source) {
   )
   out = removeUpstreamCardField(out, 'controlScroll')
   out = removeUpstreamCardField(out, 'thinkAutoExpand')
-
-  // 限高 CSS：追加到 TypewriterAssistantNodeView 的模块样式表
-  out = swap(
-    out,
-    'client/cap-css',
-    '\t\tconst css$4 = "',
-    '\t\tconst css$4 = "' + THINK_CAP_CSS,
-  )
 
   return out
 }
