@@ -166,6 +166,586 @@ const FOLLOW_HANDOFF = String.raw`
 `
 
 /** DSH 0.2 reuses one scroll element when the active Session changes. */
+/**
+ * 图片加载后补回底部（2026-10-07）。
+ *
+ * 背景（实测取证，见 README「2026-10-07 图片撑高」段）：
+ *   会话里的 `<img>` 在文本渲染后才解码完成，会把所在行撑高（实测一条 user 行
+ *   118px → 406px，+288px）。官方 scroll restoration 只在渲染完成时贴一次底，
+ *   图片随后撑高就把位置留在了"偏上一点"处 —— 用户看到的现象就是
+ *   「明明滚到底了，切回去却在底部偏上」。
+ *
+ * 本模块只做一件事：当**图片撑高了内容**、且**撑高前那一刻本来就是贴底的**，
+ * 把位置补回底部。任何其它情况一律不碰。
+ *
+ * 安全闸门（缺一不可，任一不满足就完全不动）：
+ *   ① 开关 imageSettle 必须为真；
+ *   ② 只响应 img 的 load/error（即"图片撑高"这一个原因），不做通用高度跟随；
+ *   ③ 撑高前必须贴底（slack <= 2px）—— 读者停在中间时绝不补位；
+ *   ④ 距上次「读者主动滚动」超过 QUIET_MS（读者没有任何近期平移意图）；
+ *   ⑤ 会话切换后只观察 ARMED_MS 窗口，之后彻底撒手，不再管任何高度变化；
+ *   ⑥ 同一次撑高只补一次（按内容高度去重），避免与官方反复争夺。
+ *
+ * 写入范围：只写 [data-conversation-scroll].scrollTop，且只在上述闸门全开时。
+ * 不写样式、不造预留、不改任何元素属性。
+ */
+/**
+ * 图片宽高比占位（治本，2026-10-07）。
+ *
+ * 病根（实测取证，见 README「2026-10-07 图片撑高」段）：
+ *   消息里的图片（`dsh-codex-subscription` 的 `MessageImagePreview`）渲染
+ *   `<img src alt>` 时**不带任何尺寸**，CSS 又是 `height:auto; max-height:320px`。
+ *   于是图片解码完成前该行内容高度近似为零，解码后才被撑开。
+ *
+ *   官方 ChatViewport 靠 ResizeObserver 观察内容列来跟随底部，必须等布局提交后
+ *   才收到通知，所以「内容撑高」与「滚动位置修正」天然隔了一帧：那一帧是用户
+ *   看到的「先上去」，下一帧被修正回来就是「再下来」。这个 1 帧窗口无法从跟随侧
+ *   消除，只能从「别让它撑高」入手。
+ *
+ * 治法：在图片**解码之前**把宽高比写进 `style.aspect-ratio`，内容高度第一次渲染
+ * 就是最终值，撑高从机制上不再发生（实测：插入前写占位 → 行高从插入那刻起即最终
+ * 值，跳动 0px）。
+ *
+ * 尺寸来源（同步可得，按可靠性排序）：
+ *   ① React fiber 上的 `image.attachment.width/height`（官方渲染时就带着；
+ *      实测从 `__reactFiber$*` 起点向上 1 层即命中）；
+ *   ② 已解码图片的 `naturalWidth/naturalHeight`（兜底）。
+ *   两者都读不到就什么都不做 —— 绝不猜比例，那会把高度写错。
+ *
+ * 写入范围：只写 `img.style.aspectRatio`（并且只在图片尚未解码、尚无任何比例来源时）。
+ */
+const IMAGE_PLACEHOLDER = String.raw`
+		//#region dsh-stream-think: 图片宽高比占位（消除"先上去再下来"）
+		const IMAGE_PLACEHOLDER_ATTR = "data-stream-think-ratio";
+		const IMAGE_PLACEHOLDER_MAX_PX = 320; // 官方 CSS 的 max-height
+		const IMAGE_PLACEHOLDER_SELECTOR = ".codexMessageImages img";
+		/** 占位真正要写在**容器**上：图片是异步插入 button 的（首帧只有「…」），
+		 *  而 button 高度 auto 会随内容塌陷再撑开 —— 写 img 拦不住那次撑高。 */
+		const IMAGE_PLACEHOLDER_BOX_SELECTOR = ".codexMessageImages[data-single=true] .codexImageThumb";
+		let imagePlaceholderApplied = 0;
+		/**
+		* 从 React fiber 同步读图片的声明尺寸。
+		*
+		* 为什么不用 naturalWidth：那个值要等解码完成才有，而本模块的全部意义就是
+		* 在解码**之前**写下比例。fiber 上的 props 是同步可读的。
+		* 向上限 16 层，只认 image.attachment 与 width/height 两种形状；
+		* 越界或形状不符就放弃，不猜。
+		*/
+		function readDeclaredImageSize(element) {
+			if (element === null || element === void 0) return null;
+			let keys;
+			try { keys = Object.keys(element); } catch (error) { return null; }
+			for (const key of keys) {
+				if (key.startsWith("__reactFiber") === false && key.startsWith("__reactProps") === false) continue;
+				let node = element[key];
+				for (let depth = 0; depth < 16 && node !== null && node !== void 0; depth++) {
+					const props = node.memoizedProps ?? node.pendingProps;
+					if (props !== null && props !== void 0) {
+						const attachment = props.image?.attachment;
+						if (attachment !== void 0 && typeof attachment.width === "number" && typeof attachment.height === "number" && attachment.width > 0 && attachment.height > 0) {
+							return { width: attachment.width, height: attachment.height };
+						}
+						if (typeof props.width === "number" && typeof props.height === "number" && props.width > 0 && props.height > 0) {
+							return { width: props.width, height: props.height };
+						}
+					}
+					node = node.return;
+				}
+			}
+			return null;
+		}
+		/**
+		* 给**图片容器**（button.codexImageThumb）写占位高度。
+		*
+		* 为什么必须写容器而不是 img（实测对比）：
+		*   MessageImagePreview 首次渲染时 src 还没就绪，button 里只有「…」文本，
+		*   高度约 18px；img 要等异步 loadImage 完成后才被插入。实测：
+		*     占位写在 img 上 → 插入前 button 34px、插入后 322px（+288px 撑高，无效）
+		*     占位写在 button 上 → 插入前 323px、插入后 323px（0 增长，有效）
+		*   因为 button 在单图模式下是 height:auto，高度由内容撑开；图片迟到就会
+		*   先塌后撑。只有把高度钉在 button 自己身上，才能让"行高"从第一帧就正确。
+		*
+		* 高度按容器宽度 × 图片比例算：单图模式容器宽 240px（官方 CSS 固定），
+		* 用 getBoundingClientRect().width 读实测宽度更稳（窄屏会 max-width:100%）。
+		* 超过官方 max-height:320px 时按 320px 截断。
+		*/
+		function applyImageBoxPlaceholder(box) {
+			if (!(box instanceof HTMLElement)) return false;
+			if (box.hasAttribute(IMAGE_PLACEHOLDER_ATTR)) return false;
+			if (box.style.height !== "") return false; // 已有高度来源，让位
+			const size = readDeclaredImageSize(box) ?? readDeclaredImageSize(box.parentElement) ?? readDeclaredImageSize(box.querySelector("img"));
+			if (size === null) return false;
+			const width = box.getBoundingClientRect().width;
+			if (!(width > 0)) return false; // 还没布局出宽度：等下一轮，别猜
+			const scaled = width * size.height / size.width;
+			const height = Math.min(IMAGE_PLACEHOLDER_MAX_PX, scaled);
+			if (!(height > 0)) return false;
+			box.style.height = height + "px";
+			box.setAttribute(IMAGE_PLACEHOLDER_ATTR, size.width + "x" + size.height);
+			imagePlaceholderApplied += 1;
+			if (typeof window !== "undefined") window.__DSH_IMAGE_PLACEHOLDER_APPLIED__ = imagePlaceholderApplied;
+			return true;
+		}
+		function scanImageBoxes(root) {
+			if (root === null || root === void 0 || root.nodeType !== 1) return;
+			if (root.matches?.(IMAGE_PLACEHOLDER_BOX_SELECTOR)) applyImageBoxPlaceholder(root);
+			for (const box of root.querySelectorAll?.(IMAGE_PLACEHOLDER_BOX_SELECTOR) ?? []) applyImageBoxPlaceholder(box);
+		}
+		/** 已解码图片的等价尺寸；未解码返回 null。 */
+		function readLoadedImageSize(img) {
+			const w = img.naturalWidth, h = img.naturalHeight;
+			return w > 0 && h > 0 ? { width: w, height: h } : null;
+		}
+		/**
+		* 给一张图写宽高比占位。
+		*
+		* 准入条件（缺一不可）：
+		*   ① 本模块没写过（data 标记）；
+		*   ② 该图自己也没有任何比例来源（style.aspectRatio 为空）—— 不复写别人写的；
+		*   ③ 图片还没解码完成 —— **已解码的图本来就有正确高度，写占位是无意义的样式写入**；
+		*   ④ 能同步拿到尺寸。
+		*/
+		function applyImagePlaceholder(img) {
+			if (!(img instanceof HTMLImageElement)) return false;
+			if (img.hasAttribute(IMAGE_PLACEHOLDER_ATTR)) return false;
+			if (img.style.aspectRatio !== "") return false;
+			if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+				img.setAttribute(IMAGE_PLACEHOLDER_ATTR, "loaded");
+				return false;
+			}
+			const size = readDeclaredImageSize(img) ?? readDeclaredImageSize(img.parentElement) ?? readDeclaredImageSize(img.parentElement?.parentElement) ?? readLoadedImageSize(img);
+			if (size === null) return false;
+			img.style.aspectRatio = size.width + " / " + size.height;
+			img.setAttribute(IMAGE_PLACEHOLDER_ATTR, size.width + "x" + size.height);
+			imagePlaceholderApplied += 1;
+			if (typeof window !== "undefined") window.__DSH_IMAGE_PLACEHOLDER_APPLIED__ = imagePlaceholderApplied;
+			return true;
+		}
+		function scanImagePlaceholders(root) {
+			if (root === null || root === void 0) return;
+			if (root.nodeType !== 1) return;
+			if (root.tagName === "IMG" && root.matches(IMAGE_PLACEHOLDER_SELECTOR)) applyImagePlaceholder(root);
+			for (const img of root.querySelectorAll?.(IMAGE_PLACEHOLDER_SELECTOR) ?? []) applyImagePlaceholder(img);
+		}
+		/**
+		* 及早写占位：观察到 img 插入时立即处理，并**同步尝试**。
+		*
+		* 实测时序（冷启动加载含图会话）：
+		*   MutationObserver 的 childList 回调到达时，内容的 scrollHeight 已经涨到
+		*   最终值、滚动位置也已经落到偏上处 —— 也就是说**撑高已经发生**，此时再
+		*   写占位只能防止后续抖动，救不了这一帧。
+		*
+		* 真正早于布局的时机是 src 被赋值的那一刻。所以这里对**新出现的 img 实例**
+		* 做实例级 src 接管（不碰 HTMLImageElement.prototype，只影响消息区里的图片）：
+		* 在 src 写入前先把 fiber 上的比例写进 style，图片从第一次布局起就有正确高度。
+		*/
+		const imPlaceholderPatched = /* @__PURE__ */ new WeakSet();
+		function patchImageSrc(img) {
+			if (imPlaceholderPatched.has(img)) return;
+			let descriptor;
+			try { descriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src"); } catch (error) { return; }
+			if (descriptor === void 0 || typeof descriptor.set !== "function") return;
+			try {
+				Object.defineProperty(img, "src", {
+					configurable: true,
+					get() { return descriptor.get.call(this); },
+					set(value) {
+						/* src 赋值先于加载：此刻写比例，图片第一次参与布局就是最终高度。 */
+						applyImagePlaceholder(this);
+						descriptor.set.call(this, value);
+						/* 某些实现会在赋值后立即同步解码（缓存命中）；再补一次以防万一。 */
+						if (this.complete && this.naturalWidth > 0) applyImagePlaceholder(this);
+					}
+				});
+				imPlaceholderPatched.add(img);
+			} catch (error) { /* 冻结对象等：放弃接管，childList 路径仍会兜底 */ }
+		}
+		function prepareImageNode(node) {
+			if (node === null || node === void 0 || node.nodeType !== 1) return;
+			if (node.tagName === "IMG" && node.matches(IMAGE_PLACEHOLDER_SELECTOR)) { patchImageSrc(node); applyImagePlaceholder(node); }
+			for (const img of node.querySelectorAll?.(IMAGE_PLACEHOLDER_SELECTOR) ?? []) { patchImageSrc(img); applyImagePlaceholder(img); }
+		}
+		/**
+		* 常驻安装。两条路径并用：
+		*   ① childList 观察 —— 发现新 img → 实例级 src 接管 + 尝试写占位；
+		*   ② 解码完成事件 —— 兜底"插入时 fiber 还读不到、之后才补上"的情形。
+		*/
+		function installImagePlaceholder() {
+			prepareImageNode(document.body);
+			scanImageBoxes(document.body);
+			const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver((mutations) => {
+				for (const mutation of mutations) for (const node of mutation.addedNodes) { prepareImageNode(node); scanImageBoxes(node); }
+			});
+			observer?.observe(document.body, { childList: true, subtree: true });
+			const onDecoded = (event) => {
+				const target = event.target;
+				if (target instanceof HTMLImageElement && target.matches(IMAGE_PLACEHOLDER_SELECTOR)) applyImagePlaceholder(target);
+			};
+			document.addEventListener("load", onDecoded, true);
+			return () => {
+				observer?.disconnect();
+				document.removeEventListener("load", onDecoded, true);
+			};
+		}
+		//#endregion
+
+`;
+
+const IMAGE_SETTLE = String.raw`
+		//#region dsh-stream-think: 图片加载后补回底部
+		const IMAGE_SETTLE_ARMED_MS = 8000; // 会话被观察的窗口；之后彻底撒手
+		const IMAGE_SETTLE_QUIET_MS = 400; // 读者停止滚动多久后才允许补位
+		const IMAGE_SETTLE_SLACK_PX = 2; // 「贴底」判定
+		/**
+		* 「够接近底部、可以认为读者本意就在底部」的容差。
+		* 官方内容变化时的位置保持补偿会把 scrollTop 留在离底十几像素处（实测 16px）；
+		* 若按 slack=2 判，就会被误判成"读者在中间"而放走真正的偏上。
+		* 取 32px：足够覆盖官方补偿量，又远小于"读者主动停在中间"的距离
+		* （实测读者上翻一次就 ≥100px）。
+		*/
+		const IMAGE_SETTLE_CANDIDATE_PX = 32;
+		/**
+		* 补位前让官方先走一步的等待时间。
+		* 官方每次内容变化后都会自己尝试贴底；若我们同拍写入，两者会互相覆盖。
+		* 等这一拍之后，若官方已贴底就完全不介入（零写入），只有它没做到才补。
+		* 取 160ms：大于一帧、小于人能察觉的延迟。
+		*/
+		const IMAGE_SETTLE_ENTER_DELAY_MS = 160;
+		/**
+		* 切会话恢复纠偏的「偏上」上限：只把"贴着底部的一小段"算作图片撑高造成的
+		* 偏上并补回底部；超过这个距离就认为读者本来就是停在中间，一律不动。
+		* 取 512px：覆盖图片撑高可能造成的偏移（实测 304px），又远小于一屏
+		* （视口 740px）——读者主动上翻一屏是不可能被误判的。
+		*/
+		const IMAGE_SETTLE_RECOVER_MAX_PX = 512;
+		const imageSettleRecoveryTimers = [];
+		const IMAGE_SETTLE_READER_UP_PX = 24; // scrollTop 一次回退超过这么多 = 读者上翻
+		const imageSettleState = /* @__PURE__ */ new WeakMap();
+		let imageSettleArmedAt = 0;
+		let imageSettlePort = null;
+		let imageSettleHeightObserver = null;
+		let imageSettleLastReaderAt = 0;
+		let imageSettleApplied = 0;
+		let imageSettleBound = false;
+		function imageSettleEnabled() {
+			try { return getThinkSettings().imageSettle === true; } catch (error) { return false; }
+		}
+		function imageSettleSlack(port) {
+			return port.scrollHeight - port.scrollTop - port.clientHeight;
+		}
+		function imageSettleAtBottom(port) {
+			return imageSettleSlack(port) <= IMAGE_SETTLE_SLACK_PX;
+		}
+		/**
+		* 读者动了：既刷新静默计时，也把 atBottom 置假 —— 这是 atBottom 唯一
+		* 由"非贴底"转 false 的入口（见 imageSettleSnapshot 的说明）。
+		*/
+		function noteImageSettleReaderIntent() {
+			imageSettleLastReaderAt = Date.now();
+			const port = imageSettlePort;
+			if (port === null) return;
+			const state = imageSettleState.get(port);
+			if (state !== void 0) state.atBottom = false;
+		}
+		/**
+		* 记下基线。语义（这是本模块的核心，改动前务必读懂）：
+		*   · height  —— 上一次见到的内容高度（判定"是否被撑高"）
+		*   · atBottom —— 读者当前是否处于「贴底」状态
+		*
+		* atBottom 的更新规则刻意只有两条，其余一律不改：
+		*   ① 观察到贴底（slack <= 2px）        → true
+		*   ② 观察到读者主动滚动/上翻            → false（由 noteImageSettleReaderIntent）
+		* **不因为"当前不在底部"就置 false** —— 官方在内容变化时做的位置保持补偿
+		* （实测把 scrollTop 留在离底 16px 处）会让 atBottom 被误判为 false，
+		* 之后图片撑高就再也不补位了。这个坑实测踩到过，别再改回去。
+		*/
+		function imageSettleSnapshot(port) {
+			const state = imageSettleState.get(port) ?? { height: 0, atBottom: false, done: /* @__PURE__ */ new Set() };
+			state.height = port.scrollHeight;
+			if (imageSettleAtBottom(port)) state.atBottom = true;
+			imageSettleState.set(port, state);
+			return state;
+		}
+		/**
+		* 图片解码完成 → 内容可能被撑高。只有「撑高前贴底 + 读者静默 + 窗口内 + 未补过」
+		* 才把位置补回底部；否则一行不动。
+		*
+		* 关键设计：**不跟官方抢**。官方在每次内容变化后都会自己尝试贴底，
+		* 若我们在同一拍也写 scrollTop，两者会互相覆盖，甚至把位置算到中间态上。
+		* 所以补位前要等 ENTER_DELAY_MS：若官方在这段时间内已经把它补到底了，
+		* 我们的目标值就会与当前值一致，直接跳过（不产生任何写入）。
+		*/
+		function settleAfterImage(port, img) {
+			if (port === null || port.isConnected === false) return;
+			if (!imageSettleEnabled()) return;
+			if (performance.now() - imageSettleArmedAt > IMAGE_SETTLE_ARMED_MS) return;
+			const state = imageSettleState.get(port);
+			if (state === void 0) return;
+			const nextHeight = port.scrollHeight;
+			const slack = imageSettleSlack(port);
+			// 未撑高：这条路径只维护基线（观察到贴底就记 atBottom=true），不做任何写入。
+			if (nextHeight <= state.height) {
+				if (slack <= IMAGE_SETTLE_SLACK_PX) state.atBottom = true;
+				state.height = nextHeight;
+				return;
+			}
+			const wasAtBottom = state.atBottom;
+			const key = String(nextHeight) + ":" + String(img?.currentSrc ?? "");
+			state.height = nextHeight;
+			if (state.done.has(key)) return; // 同一次撑高只补一次
+			state.done.add(key);
+			// 「撑高前贴底」是补位的唯一理由。官方自己补偿时会把位置留在离底
+			// 一点点的偏上处（实测 16px），所以用比 slack 更宽的容差来判定
+			// "当时是否本就该在底部"，避免因为这十几像素放走真正的偏上。
+			if (!wasAtBottom && slack > IMAGE_SETTLE_CANDIDATE_PX) return; // 读者确实在中间 → 绝不补位
+			if (Date.now() - imageSettleLastReaderAt < IMAGE_SETTLE_QUIET_MS) return; // 读者近期有滚动意图
+			const target = Math.max(0, nextHeight - port.clientHeight);
+			// 让官方先走一步：等一拍再看它是否已经贴底；若已贴底则完全不介入。
+			const expectedHeight = nextHeight;
+			setTimeout(() => {
+				if (imageSettlePort !== port || port.isConnected === false) return;
+				if (!imageSettleEnabled()) return;
+				if (port.scrollHeight !== expectedHeight) return; // 高度又变了 → 交给下一轮，不在这里抢
+				const nowSlack = imageSettleSlack(port);
+				if (nowSlack <= IMAGE_SETTLE_SLACK_PX) { state.atBottom = true; return; } // 官方已处理
+				if (Date.now() - imageSettleLastReaderAt < IMAGE_SETTLE_QUIET_MS) return; // 期间读者动了
+				const nowTarget = Math.max(0, expectedHeight - port.clientHeight);
+				if (Math.abs(port.scrollTop - nowTarget) <= IMAGE_SETTLE_SLACK_PX) return;
+				port.scrollTop = nowTarget;
+				/* 可观测标记：写到自己的计数器上，便于实测断言与排障（不碰宿主 DOM）。 */
+				imageSettleApplied += 1;
+				if (typeof window !== "undefined") window.__DSH_IMAGE_SETTLE_APPLIED__ = imageSettleApplied;
+				state.atBottom = true;
+				state.height = port.scrollHeight;
+			}, IMAGE_SETTLE_ENTER_DELAY_MS);
+		}
+		/** 会话切换：重新武装窗口并对新 port 取基线。 */
+		function armImageSettle(port) {
+			if (port === null || port.isConnected === false) return;
+			imageSettlePort = port;
+			imageSettleArmedAt = performance.now();
+			// 只重置「上次读者滚动时刻」这一项：切会话的瞬间官方自己会写 scrollTop
+			// （位置恢复），那不是读者意图，不该压制后续补位。之后读者的任何
+			// wheel/keydown/touchmove/scroll 都会把它刷新，届时补位自动让路。
+			imageSettleLastReaderAt = -1e9;
+			imageSettleState.delete(port);
+			const armed = imageSettleSnapshot(port);
+			// 切进来时是否"一开始就贴底"——纠偏路径的准入条件。
+			// 若进入时本来就贴底，那之后任何偏上都是内容变化造成的，值得纠偏；
+			// 若进入时就偏上，则更可能是"官方忠实恢复了读者上次停的位置"，
+			// 也可能是被记住的偏上值 —— 两者无法当场区分，交给复查窗口内的
+			// 稳定性判定（内容定型 + 位置始终不动）来定夺。
+			armed.enteredAtBottom = imageSettleAtBottom(port);
+			watchImageSettleHeight(port);
+			scheduleImageSettleRecovery(port);
+		}
+		/**
+		* 会话切换后的「位置恢复纠偏」。
+		*
+		* 为什么需要它（这是用户报的稳定复现路径，实测取证）：
+		*   官方会记住每个会话的 scrollTop 并忠实恢复。若某一次因图片撑高而落在
+		*   偏上处（实测 1745 / gap=304px），**这个偏上值会被当成阅读位置永久记住**，
+		*   之后每次切回来都恢复成偏上 —— 表现为"有些会话稳定偏上"。
+		*
+		* 由于这一刻内容高度并无变化，撑高那条路径（settleAfterImage）不会介入，
+		* 所以单靠它修不了这个症状。这里在会话切换后的一小段窗口内做几次复查：
+		* 只有当「内容已定型不再长高」且「位置贴着内容底部一小段但没到底」
+		* 且「读者没动过」时，才把位置补到真正的底部。
+		*
+		* 只在窗口期内复查（REARM_MS），之后彻底撒手。
+		*/
+		const IMAGE_SETTLE_REARM_DELAYS_MS = [700, 1400, 2400];
+		function scheduleImageSettleRecovery(port) {
+			imageSettleRecoveryTimers.forEach(clearTimeout);
+			imageSettleRecoveryTimers.length = 0;
+			// 记录每次复查看到的位置：只有"接连两次看到同一个偏上值"
+			// 才认为它是稳定状态（官方恢复后的静止值 / 被记住的值），
+			// 从而排除"读者正在拖动"或"渲染过程中"这两种会漂移的情况。
+			let lastSeenTop = null;
+			for (const delay of IMAGE_SETTLE_REARM_DELAYS_MS) {
+				imageSettleRecoveryTimers.push(setTimeout(() => {
+					if (imageSettlePort !== port || port.isConnected === false) return;
+					if (!imageSettleEnabled()) return;
+					if (performance.now() - imageSettleArmedAt > IMAGE_SETTLE_ARMED_MS) return;
+					if (Date.now() - imageSettleLastReaderAt < IMAGE_SETTLE_QUIET_MS) return;
+					const topNow = Math.round(port.scrollTop);
+					const slack = imageSettleSlack(port);
+					const state = imageSettleState.get(port);
+					if (state === void 0) return;
+					// 位置在两次复查之间还在变 → 不是稳定态（读者在动 / 官方在调）→ 不插手
+					const stable = lastSeenTop !== null && Math.abs(topNow - lastSeenTop) <= IMAGE_SETTLE_SLACK_PX;
+					lastSeenTop = topNow;
+					// 已经到底：无事可做
+					if (slack <= IMAGE_SETTLE_SLACK_PX) return;
+					// 离底太远 → 读者就是停在这里的，绝不是"图片撑高造成的偏上"
+					if (slack > IMAGE_SETTLE_RECOVER_MAX_PX) return;
+					// 内容还在长高（渲染未定型）→ 交给下一轮复查，别在过程里插手
+					if (port.scrollHeight !== state.height) {
+						state.height = port.scrollHeight;
+						return;
+					}
+					// 内容定型了、位置也稳定，才纠偏
+					if (!stable) return;
+					const target = Math.max(0, port.scrollHeight - port.clientHeight);
+					if (Math.abs(port.scrollTop - target) <= IMAGE_SETTLE_SLACK_PX) return;
+					port.scrollTop = target;
+					imageSettleApplied += 1;
+					if (typeof window !== "undefined") window.__DSH_IMAGE_SETTLE_APPLIED__ = imageSettleApplied;
+					state.atBottom = true;
+					lastSeenTop = Math.round(port.scrollTop);
+				}, delay));
+			}
+		}
+		/**
+		* 窗口期内盯住**内容容器**的高度变化。
+		*
+		* 两个必须注意的点（都是实测踩出来的）：
+		*   ① 不能观察滚动容器 —— 它的高度被 CSS 钉死在视口高（实测 740px），
+		*      内容撑高时它一个像素都不变，ResizeObserver 永远不回调。
+		*      真正随内容变高的是 [data-chat-flow]（内容列）。
+		*   ② 同时挂 img 的 load/error 作为第二触发源：图片解码与布局提交之间
+		*      存在时间差，两个信号互补。
+		*
+		* 离开观察窗口就 disconnect，不做长期跟随。
+		*/
+		function watchImageSettleHeight(port) {
+			if (typeof ResizeObserver === "undefined") return;
+			imageSettleHeightObserver?.disconnect();
+			const target = port.querySelector("[data-chat-flow]") ?? port.firstElementChild ?? port;
+			const observer = new ResizeObserver(() => {
+				if (performance.now() - imageSettleArmedAt > IMAGE_SETTLE_ARMED_MS) {
+					observer.disconnect();
+					imageSettleHeightObserver = null;
+					return;
+				}
+				const current = imageSettlePort;
+				if (current === null || current.isConnected === false) return;
+				// 下一帧再量：ResizeObserver 回调时布局可能仍在提交中。
+				requestAnimationFrame(() => {
+					if (imageSettlePort !== current) return;
+					settleAfterImage(current, null);
+				});
+			});
+			observer.observe(target);
+			imageSettleHeightObserver = observer;
+		}
+		function installImageSettle() {
+			if (imageSettleBound) return () => {};
+			imageSettleBound = true;
+			const onImageDone = (event) => {
+				const img = event.target;
+				if (!(img instanceof HTMLImageElement)) return;
+				const port = img.closest?.("[data-conversation-scroll]");
+				if (port === null || port === void 0 || port !== imageSettlePort) return;
+				// 图片事件发生在解码后，但布局可能还没提交；下一帧再测量更准。
+				requestAnimationFrame(() => settleAfterImage(port, img));
+			};
+			const onWheelOrKey = () => noteImageSettleReaderIntent();
+			// 拖动滚动条 / 触控板惯性不派发 wheel。用「读者上滚」这一条补判据：
+			// 只有位置**比我们上次见到的更靠上**（scrollTop 变小）才算读者主动看更早的内容；
+			// 官方位置恢复、图片撑高后的补位都会让 scrollTop 变大或持平，不会误判。
+			let lastSeenTop = -1;
+			const onScroll = (event) => {
+				const port = event.target;
+				if (port === document || port === window) return;
+				if (port?.matches?.("[data-conversation-scroll]") !== true) return;
+				if (port !== imageSettlePort) return;
+				const top = port.scrollTop;
+				if (lastSeenTop >= 0 && top < lastSeenTop - IMAGE_SETTLE_READER_UP_PX) noteImageSettleReaderIntent();
+				lastSeenTop = top;
+			};
+			document.addEventListener("load", onImageDone, true);
+			document.addEventListener("error", onImageDone, true);
+			window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+			window.addEventListener("wheel", onWheelOrKey, { passive: true });
+			window.addEventListener("touchmove", onWheelOrKey, { passive: true });
+			window.addEventListener("keydown", onWheelOrKey);
+			return () => {
+				imageSettleBound = false;
+				imageSettleHeightObserver?.disconnect();
+				imageSettleHeightObserver = null;
+				imageSettleRecoveryTimers.forEach(clearTimeout);
+				imageSettleRecoveryTimers.length = 0;
+				document.removeEventListener("load", onImageDone, true);
+				document.removeEventListener("error", onImageDone, true);
+				window.removeEventListener("scroll", onScroll, { capture: true });
+				window.removeEventListener("wheel", onWheelOrKey);
+				window.removeEventListener("touchmove", onWheelOrKey);
+				window.removeEventListener("keydown", onWheelOrKey);
+				imageSettlePort = null;
+			};
+		}
+		/**
+		* 会话切换的检测。
+		*
+		* 实测（桌面 19387）：切换会话时 data-conversation-session 属性**不会变**
+		* （DSH 0.2 复用一个滚动元素，属性值保持不变），所以不能只盯它。
+		* 真正可靠的信号是**内容本身**：首行的 data-chat-flow-key 在换会话时必然变。
+		* 两者一起看，取「任一变化即重新武装」。
+		*/
+		function imageSettleFingerprint() {
+			const port = document.querySelector("[data-conversation-scroll]");
+			if (port === null) return null;
+			const session = port.closest("[data-conversation-session]")?.getAttribute("data-conversation-session") ?? "";
+			const firstRow = port.querySelector("[data-chat-flow-key]");
+			const firstKey = firstRow?.getAttribute("data-chat-flow-key") ?? "";
+			// 刻意**不**把行数放进指纹：流式输出时行数会一直变，
+			// 那样每次新增行都会重新武装，纠偏窗口永不结束。
+			return { port, key: session + "|" + firstKey };
+		}
+		function watchImageSettleSessions() {
+			let fingerprint = null;
+			const initial = imageSettleFingerprint();
+			if (initial !== null) {
+				fingerprint = initial.key;
+				armImageSettle(initial.port);
+			}
+			let pending = false;
+			const evaluate = () => {
+				if (pending) return;
+				pending = true;
+				requestAnimationFrame(() => {
+					pending = false;
+					const next = imageSettleFingerprint();
+					if (next === null) return;
+					if (next.key === fingerprint) return;
+					fingerprint = next.key;
+					armImageSettle(next.port);
+				});
+			};
+			const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(evaluate);
+			if (observer !== null) {
+				observer.observe(document.body, {
+					childList: true,
+					subtree: true,
+					attributes: true,
+					attributeFilter: ["data-conversation-session", "data-chat-flow-key"]
+				});
+			}
+			// 有些会话切换不产生可观察的 childList（复用节点、仅改文本），
+			// 用低频复查兜底。**刻意不用 setInterval**：常驻定时器会让宿主/测试
+			// 进程的事件循环一直有活（smoke-test 因此卡死过一次），且卸载后必须
+			// 显式清理才停。改成「只在观察窗口内自我续期」的链式 setTimeout，
+			// 窗口一过自然停止，无残留。
+			let pollTimer = null;
+			const schedulePoll = (delay) => {
+				pollTimer = setTimeout(() => {
+					pollTimer = null;
+					if (performance.now() - imageSettleArmedAt > IMAGE_SETTLE_ARMED_MS) return;
+					evaluate();
+					schedulePoll(500);
+				}, delay);
+			};
+			schedulePoll(500);
+			return () => {
+				observer?.disconnect();
+				if (pollTimer !== null) clearTimeout(pollTimer);
+				pollTimer = null;
+			};
+		}
+		//#endregion
+
+`;
 const FOLLOW_SESSION_ISOLATION = String.raw`
 		const followSessionOwners = new WeakMap();
 		const followSessionActivations = new WeakMap();
@@ -770,7 +1350,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t//#region dsh-stream-think: 思考行展开设置（localStorage，不依赖 Host）',
   '\t\t/** 展开/收起/预览行数全部由本插件决定，改完立刻生效，不需要重启。 */',
   '\t\tconst THINK_SETTINGS_KEY = "dsh-stream-think:settings.v1";',
-  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
+  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, imageSettle: true, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
   '\t\tconst thinkSettingsListeners = new Set();',
   '',
   '\t\tfunction readThinkSettings() {',
@@ -794,6 +1374,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\t\tif (typeof parsed.showOtherTools === "boolean") out.showOtherTools = parsed.showOtherTools;',
   '\t\t\t\t\t\t// groupAutoExpand / toolSummary 已废弃：过程行注入会把思考盒带坏，不再读取',
   '\t\t\t\t\t\tif (typeof parsed.controlScroll === "boolean") out.controlScroll = parsed.controlScroll;',
+  '\t\t\t\t\t\tif (typeof parsed.imageSettle === "boolean") out.imageSettle = parsed.imageSettle;',
   '\t\t\t\t\t}',
   '\t\t\t\t}',
   '\t\t\t} catch (error) { /* 隐私模式 / 脏数据 → 默认值 */ }',
@@ -884,12 +1465,16 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\t\t\t: "已关闭：Think 内层保持展开；整轮结束后可从过程组查看",',
   '\t\t\t\t\tswitchBtn(s.autoCollapse, "单段推理结束后收起 Think", "stream-think-auto-collapse",',
   '\t\t\t\t\t\t() => updateThinkSettings({ autoCollapse: !s.autoCollapse }))),',
-  '\t\t\t\trow("controlScroll", "跟随动画",',
-  '\t\t\t\t\ts.controlScroll',
-  '\t\t\t\t\t\t? "平滑：逐帧追到底部；手动上翻即暂停（默认）"',
-  '\t\t\t\t\t\t: "瞬时：内容一变就直接落到底，不播放平滑追赶",',
-  '\t\t\t\t\tswitchBtn(s.controlScroll, "平滑跟随动画", "stream-think-control-scroll",',
-  '\t\t\t\t\t\t() => updateThinkSettings({ controlScroll: !s.controlScroll }))),',
+  '\t\t\t\trow("controlScroll", "跟随动画（已停用）",',
+  '\t\t\t\t\t"跟随已整条交回官方：本插件不再操作会话滚动。开关保留但当前没有任何效果。",',
+  '\t\t\t\tswitchBtn(s.controlScroll, "平滑跟随动画（已停用）", "stream-think-control-scroll",',
+  '\t\t\t\t\t() => updateThinkSettings({ controlScroll: !s.controlScroll }))),',
+  '\t\t\t\trow("imageSettle", "图片加载后补回底部",',
+  '\t\t\t\t\ts.imageSettle',
+  '\t\t\t\t\t\t? "切回会话时若图片撑高了内容而落到偏上，自动补回底部（默认）"',
+  '\t\t\t\t\t\t: "已关闭：偏上时不自动补位，由官方自身行为决定",',
+  '\t\t\t\t\tswitchBtn(s.imageSettle, "图片加载后补回底部", "stream-think-image-settle",',
+  '\t\t\t\t\t\t() => updateThinkSettings({ imageSettle: !s.imageSettle }))),',
   '\t\t\t\th("div", { className: "dsh-stream-think-set-heading" }, "直接显示在对话中"),',
   '\t\t\t\trow("showTaskUpdates", "任务清单", "显示最近一次有效清单及更新次数（默认）",',
   '\t\t\t\t\tswitchBtn(s.showTaskUpdates, "在对话中显示任务清单", "stream-think-show-task-updates", () => updateThinkSettings({ showTaskUpdates: !s.showTaskUpdates }))),',
@@ -1369,6 +1954,255 @@ function patchClient(source) {
   out = swap(out, 'client/session-settle-cancel-frame', '\t\t\t\t\t\trequestAnimationFrame(settleFrame);', '\t\t\t\t\t\tsettleRafId = requestAnimationFrame(settleFrame);')
   out = swap(out, 'client/session-settle-cancel-start', '\t\t\t\t\trequestAnimationFrame(settleFrame);', '\t\t\t\t\tsettleRafId = requestAnimationFrame(settleFrame);')
 
+  /* ── 滚动一律交回官方（2026-10-07） ─────────────────────────────────────
+   * 用户判定：跟随器的实现已经不如原生，任何滚动/布局写入都可能成为 BUG 源。
+   * 于是把整条滚动实现停用，只保留「不改滚动」的能力（打字机/思考行展开收起/
+   * 八类摘要/计时行接管/`btw`/诊断探针）。
+   *
+   * 停用方式：这些写入点全部只被 useConversationFollow 的帧循环与清理路径
+   * （applyVisual→ensureRunway/setFlowPad/setFollowScrollTop、releaseFollowSession、
+   * finishAtNaturalFloor、FollowHost 的 onGrowth 脉冲）调用，所以关掉这个 hook
+   * 的启动条件即可一次性停掉：rAF 写 scrollTop、overflowAnchor/scrollBehavior 改写、
+   * runway/settle 的 marginTop/paddingBottom、flow-fill 的 minHeight、
+   * 消息行 transform 位移补偿、会话隔离与交接。官方既有 [data-conversation-scroll]
+   * 的自动跟随，交还后行为与未派生版本一致。
+   *
+   * 下面每条锚点都带来源注释；上游改版导致失配时 derive 会整份失败并报出来。 */
+  // ① 主入口：跟随器永不启动（原式 useConversationFollow(rootRef, active || entrance, …)）
+  out = swap(
+    out,
+    'client/scroll-follow-disabled',
+    '\t\t\tuseConversationFollow(rootRef, active || entrance,',
+    [
+      '\t\t\t/* dsh-stream-think：滚动跟随整条停用（见 tools/derive.mjs「滚动一律交回官方」段）。',
+      '\t\t\t * useConversationFollow 只被注释保留在下方，运行时不再被调用。 */',
+      '\t\t\tif (false) useConversationFollow(rootRef, active || entrance,',
+    ].join('\n'),
+  )
+  // ② 入场动画是跟随器的副产物（entrance 只用于 glide 首屏高度），一并停掉
+  out = swap(
+    out,
+    'client/scroll-entrance-disabled',
+    '\t\t\treturn isFollowableChatNode(node);',
+    '\t\t\t/* dsh-stream-think：入场 glide 由跟随器驱动，已随滚动停用。 */\n\t\t\treturn false; // was: isFollowableChatNode(node)',
+  )
+  // ③ 运行时接力（未知/终态行的 handoff）同样只喂入场动画
+  out = swap(
+    out,
+    'client/scroll-runtime-handoff-disabled',
+    '\t\t\t\t\truntimePersistentRef.current = mode === "turn";\n\t\t\t\t\tsetRuntimeFollowable(true);\n\t\t\t\t\tsetEntering(true);',
+    [
+      '\t\t\t\t\t/* dsh-stream-think：运行时接力只为跟随器重新入场，已停用。 */',
+      '\t\t\t\t\truntimePersistentRef.current = mode === "turn";',
+      '\t\t\t\t\truntimeHandledRef.current = true;',
+    ].join('\n'),
+  )
+  // ④ DSH 0.2 的逐字器：正文每帧增长会把官方跟随逼成离散步进，随「滚动交回」一起关掉
+  //    （useSmoothStreamContent 的 enabled=false 分支走 syncImmediate，content 一变即整段落盘）
+  out = swap(out, 'client/reveal-disabled-markdown', '\t\t\t\tenabled: typing && !reduced,', '\t\t\t\tenabled: false, // was: typing && !reduced（滚动交回官方：正文整段出）')
+  out = swap(out, 'client/reveal-disabled-think', '\t\t\t\tenabled: running && !reduced,', '\t\t\t\tenabled: false, // was: running && !reduced（同上）')
+  //    注意锚点只覆盖到第二个实参，行内注释必须用 /* */ —— `//` 会把后面的实参一起注释掉
+  out = swap(out, 'client/reveal-disabled-dom', '\t\t\tuseProgressiveDomText(hostRef, followable,', '\t\t\tuseProgressiveDomText(hostRef, false, /* was: followable */')
+  // ⑤ 对数渐隐是逐字器的高光副产物，没有逐字就没有它
+  out = swap(out, 'client/log-fade-disabled-markdown', '\t\t\tuseLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef);', '\t\t\tuseLogarithmicFade(followRootRef, false, live, speedCpsRef); // 滚动交回官方：不逐字 → 不渐隐')
+  out = swap(out, 'client/log-fade-disabled-think', '\t\t\tuseLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, running, fadeSpeedRef);', '\t\t\tuseLogarithmicFade(fadeRootRef, false, running, fadeSpeedRef); // 同上')
+  // ⑥ FollowHost 的 onGrowth 脉冲只为跟随器再武装一次 glide → 交给 wrapped 组件时不传
+  out = swap(out, 'client/scroll-growth-pulse-disabled', '\t\t\t\t\tonGrowth: followable ? onGrowth : void 0,', '\t\t\t\t\tonGrowth: void 0, // 滚动交回官方：不触发跟随脉冲')
+  // ⑦ entrance 属性只服务那条 glide 动画（[data-entrance=active]），不再被点亮
+  out = swap(out, 'client/entrance-attr-disabled', '\t\t\t\t\tentranceActive: entering || growthPulse,', '\t\t\t\t\tentranceActive: false, // 滚动交回官方：入场动画随跟随器停用')
+  // ⑧ 思考摘录自实现的横向滚动（推理中把摘录拖到尾部）也去掉，交给原生渲染
+  out = swap(out, 'client/summary-scrollleft-disabled', '\t\t\t\telement.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0;', '\t\t\t\t/* 滚动交回官方：不再驱动摘录横向滚动。 */')
+
+
+  /* ── 原生计时行接管：撤销（2026-10-07） ────────────────────────────────
+   * 用户只要摘要，不要「计时数字 / 过程标题过渡」。撤销范围严格限定在 clock：
+   *   ① 读按钮标签的 MutationObserver + clock 状态
+   *   ② clockLabelParts/canAnimateClockChange 数字逐位过渡
+   *   ③ .dsh-stream-think-clock-overlay 那层 span
+   *   ④ clock 专属 CSS 与 data-clock-ready 属性
+   * 摘要（turn-process-overlay）整套保留：highlights 状态、processHighlights 读取、
+   * .dsh-stream-think-highlights 渲染与八类分组开关都不动。
+   * 摘要本就只用 `.dsh-stream-think-clock:has(.dsh-stream-think-highlights)` 做样式钩子，
+   * 因此容器 div 与类名保留（改名会连带改 6 条 CSS 选择器，收益为零）。 */
+  // ① 宿主的运行状态行不再被观察/改写 — live-* 与 process-title* 在注入块里早已无任何 DOM 使用，
+  //    这里连 CSS 一起删掉（process-label 是摘要展开用的，保留）
+  out = swap(
+    out,
+    'client/turn-process-live-css-removed',
+    [
+      '\t\t\t"[data-chat-running] .dsh-stream-think-live-content{position:relative}",',
+      '\t\t\t"[data-chat-running] .dsh-stream-think-live-native{position:absolute;opacity:0;pointer-events:none}",',
+      '\t\t\t"[data-chat-running] .dsh-stream-think-live-overlay{display:inline-block;min-width:0;white-space:nowrap;pointer-events:none;color:inherit;font:inherit;line-height:inherit;font-variant-numeric:tabular-nums}",',
+    ].join('\n'),
+    '\t\t\t/* 原生计时行接管已撤销：live-content / live-native / live-overlay 三条 CSS 一并删除 */',
+  )
+  out = swap(
+    out,
+    'client/turn-process-title-css-removed',
+    [
+      '\t\t\t"[data-step-process] button[data-process-activity].dsh-stream-think-process-title{position:relative;min-width:0;max-width:100%;overflow:visible}",',
+      '\t\t\t".dsh-stream-think-process-title .dsh-stream-think-process-native{position:absolute;opacity:0;pointer-events:none}",',
+      '\t\t\t".dsh-stream-think-process-viewport{display:block;position:relative;flex:0 1 auto;min-width:0;height:1lh;overflow:hidden;pointer-events:none}",',
+    ].join('\n'),
+    '\t\t\t/* 原生过程标题接管已撤销：process-title / process-native / process-viewport 三条 CSS 删除 */',
+  )
+  out = swap(
+    out,
+    'client/turn-process-clock-css-removed',
+    [
+      '\t\t\t".dsh-stream-think-clock[data-clock-ready] button[data-turn-process]>span:first-child{color:transparent!important;font-variant-numeric:tabular-nums}",',
+      '\t\t\t".dsh-stream-think-clock-overlay{box-sizing:border-box;position:absolute;top:0;left:0;width:100%;height:calc(33px + var(--dsh-content-font-delta,0px));padding:0 0 8px;pointer-events:none;overflow:hidden;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px));font-variant-numeric:tabular-nums}",',
+      '\t\t\t".dsh-stream-think-clock:has(.dsh-stream-think-highlights) button[data-turn-process]{height:calc(28px + var(--dsh-content-font-delta,0px));padding:0;border-bottom:0}",',
+      '\t\t\t".dsh-stream-think-clock:has(.dsh-stream-think-highlights) .dsh-stream-think-clock-overlay{top:2px;height:calc(24px + var(--dsh-content-font-delta,0px));padding:0}",',
+      '\t\t\t".dsh-stream-think-clock:has(button[data-turn-process]:not(:disabled):hover) .dsh-stream-think-clock-overlay{color:var(--dsw-alias-label-primary)}",',
+    ].join('\n'),
+    '\t\t\t/* clock 接管已撤销：文字透明化 / clock-overlay / 两条 hover 规则删除；保留下面一条只服务摘要的布局规则 */',
+  )
+  out = swap(
+    out,
+    'client/turn-process-number-css-removed',
+    [
+      '\t\t\t".dsh-stream-think-clock-number{display:inline-block;position:relative;vertical-align:bottom;height:1lh;line-height:1lh;overflow:hidden}",',
+      '\t\t\t".dsh-stream-think-clock-next{display:inline-block;animation:dsh-stream-think-clock-in .22s cubic-bezier(.2,.8,.2,1) both}",',
+      '\t\t\t".dsh-stream-think-clock-old{position:absolute;top:0;left:0;animation:dsh-stream-think-clock-out .22s cubic-bezier(.2,.8,.2,1) both}",',
+    ].join('\n'),
+    '\t\t\t/* clock 数字逐位过渡已撤销 */',
+  )
+  out = swap(
+    out,
+    'client/turn-process-keyframes-removed',
+    [
+      '\t\t\t"@keyframes dsh-stream-think-clock-in{from{opacity:0;transform:translateY(.45em)}to{opacity:1;transform:translateY(0)}}",',
+      '\t\t\t"@keyframes dsh-stream-think-clock-out{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-.45em)}}",',
+      '\t\t\t"@keyframes dsh-stream-think-summary-in{from{opacity:0;transform:translateY(-100%)}to{opacity:1;transform:translateY(0)}}",',
+      '\t\t\t"@keyframes dsh-stream-think-summary-out{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(100%)}}",',
+    ].join('\n'),
+    '\t\t\t/* clock 数字与过程标题翻页的 keyframes 已撤销 */',
+  )
+  out = swap(
+    out,
+    'client/turn-process-reduced-motion-removed',
+    '\t\t\t"@media (prefers-reduced-motion:reduce){.dsh-stream-think-clock-next,.dsh-stream-think-clock-old{animation:none}.dsh-stream-think-clock-old{display:none}}"',
+    '\t\t\t/* clock 数字动画的 reduced-motion 兜底已随动画一并撤销 */',
+  )
+  // ② 读标签的 observer 与 clock 状态
+  out = swap(
+    out,
+    'client/turn-process-clock-observer-removed',
+    [
+      '\t\t\t\tconst highlightId = (0, react.useId)();',
+      '\t\t\t\tconst [clock, setClock] = (0, react.useState)({ previous: "", current: "", sequence: 0 });',
+    ].join('\n'),
+    '\t\t\t\tconst highlightId = (0, react.useId)();',
+  )
+  out = swap(
+    out,
+    'client/turn-process-clock-read-removed',
+    [
+      '\t\t\t\t(0, react.useLayoutEffect)(() => {',
+      '\t\t\t\t\tconst root = rootRef.current;',
+      '\t\t\t\t\tif (root === null) return;',
+      '\t\t\t\t\tlet lastLabel = "";',
+      '\t\t\t\t\tconst read = () => {',
+      '\t\t\t\t\t\tconst label = root.querySelector("button[data-turn-process]>span:first-child");',
+      '\t\t\t\t\t\tconst next = label?.textContent ?? "";',
+      '\t\t\t\t\t\tif (next === lastLabel) return;',
+      '\t\t\t\t\t\tlastLabel = next;',
+      '\t\t\t\t\t\tsetClock((old) => old.current === next ? old : { previous: old.current, current: next, sequence: old.sequence + 1 });',
+      '\t\t\t\t\t};',
+      '\t\t\t\t\tread();',
+      '\t\t\t\t\tconst observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(read);',
+      '\t\t\t\t\tobserver?.observe(root, { childList: true, characterData: true, subtree: true });',
+      '\t\t\t\t\treturn () => observer?.disconnect();',
+      '\t\t\t\t}, []);',
+      '\t\t\t\tconst closed = props.node?.location?.turn?.status === "closed";',
+    ].join('\n'),
+    [
+      '\t\t\t\t/* 原生计时行接管已撤销：不再读按钮标签、不做数字过渡。 */',
+      '\t\t\t\tconst closed = props.node?.location?.turn?.status === "closed";',
+    ].join('\n'),
+  )
+  // ③ 数字逐位过渡的计算与 clock-overlay 渲染
+  out = swap(
+    out,
+    'client/turn-process-clock-content-removed',
+    [
+      '\t\t\t\tconst oldParts = clockLabelParts(clock.previous);',
+      '\t\t\t\tconst parts = clockLabelParts(clock.current);',
+      '\t\t\t\tconst animate = canAnimateClockChange(clock.previous, clock.current);',
+      '\t\t\t\tconst content = parts.map((part, i) => {',
+      '\t\t\t\t\tif (!animate || i % 2 === 0 || part === oldParts[i]) return part;',
+      '\t\t\t\t\treturn (0, react.createElement)("span", { className: "dsh-stream-think-clock-number", key: clock.sequence + ":" + i },',
+      '\t\t\t\t\t\t(0, react.createElement)("span", { className: "dsh-stream-think-clock-old" }, oldParts[i]),',
+      '\t\t\t\t\t\t(0, react.createElement)("span", { className: "dsh-stream-think-clock-next" }, part));',
+      '\t\t\t\t});',
+      '\t\t\t\tconst visible = visibleProcessHighlights(props.nativeHighlights ?? highlights, detailSettings);',
+    ].join('\n'),
+    [
+      '\t\t\t\t/* 原生计时行接管已撤销：不再计算数字过渡内容。 */',
+      '\t\t\t\tconst visible = visibleProcessHighlights(props.nativeHighlights ?? highlights, detailSettings);',
+    ].join('\n'),
+  )
+  out = swap(
+    out,
+    'client/turn-process-clock-node-removed',
+    [
+      '\t\t\t\treturn (0, react.createElement)("div", { ref: rootRef, className: "dsh-stream-think-clock", "data-clock-ready": clock.current !== "" || void 0, "data-live-empty": !closed && !showHighlights || void 0 },',
+      '\t\t\t\t\t(0, react.createElement)(Inner, props),',
+      '\t\t\t\t\tclock.current !== "" && (0, react.createElement)("span", { className: "dsh-stream-think-clock-overlay", "aria-hidden": true }, ...content),',
+    ].join('\n'),
+    [
+      '\t\t\t\treturn (0, react.createElement)("div", { ref: rootRef, className: "dsh-stream-think-clock", "data-live-empty": !closed && !showHighlights || void 0 },',
+      '\t\t\t\t\t(0, react.createElement)(Inner, props),',
+    ].join('\n'),
+  )
+
+  // ④ clock 专属的死函数（撤销后无任何调用点）
+  out = swap(
+    out,
+    'client/turn-process-clock-helpers-removed',
+    [
+      '\t\tfunction clockLabelParts(label) { return label.split(/(\\d+)/u); }',
+      '\t\tfunction canAnimateClockChange(previous, current) {',
+      '\t\t\tif (previous === "" || previous === current) return false;',
+      '\t\t\tconst oldParts = clockLabelParts(previous);',
+      '\t\t\tconst nextParts = clockLabelParts(current);',
+      '\t\t\tif (oldParts.length !== nextParts.length) return false;',
+      '\t\t\tlet changed = false;',
+      '\t\t\tfor (let i = 0; i < nextParts.length; i++) {',
+      '\t\t\t\tif (i % 2 === 0) {',
+      '\t\t\t\t\tif (oldParts[i] !== nextParts[i]) return false;',
+      '\t\t\t\t} else if (oldParts[i] !== nextParts[i]) {',
+      '\t\t\t\t\tif (oldParts[i].length !== nextParts[i].length) return false;',
+      '\t\t\t\t\tif (Number(nextParts[i]) - Number(oldParts[i]) !== 1) return false;',
+      '\t\t\t\t\tchanged = true;',
+      '\t\t\t\t}',
+      '\t\t\t}',
+      '\t\t\treturn changed;',
+      '\t\t}',
+    ].join('\n'),
+    '\t\t/* clockLabelParts / canAnimateClockChange 已随计时行接管撤销删除。 */',
+  )
+
+  // ⑤ 过程标题收短函数同样只服务那次接管，撤销后是死代码
+  out = swap(
+    out,
+    'client/turn-process-present-title-removed',
+    [
+      '\t\tfunction presentProcessTitle(title) {',
+      '\t\t\tconst normalized = title.replace(/\\s+/g, " ").trim();',
+      '\t\t\tconst fence = normalized.search(/\\x60{3}|~{3}/u);',
+      '\t\t\tif (fence >= 0) {',
+      '\t\t\t\tconst separator = normalized.indexOf(" · ");',
+      '\t\t\t\tconst label = (separator >= 0 && separator < fence ? normalized.slice(0, separator) : normalized.slice(0, fence)).replace(/[\\s·:：]+$/u, "").trim();',
+      '\t\t\t\treturn (label === "" ? "正在分析请求" : label) + " · 代码片段";',
+      '\t\t\t}',
+      '\t\t\tconst chars = [...normalized];',
+      '\t\t\treturn chars.length > 100 ? chars.slice(0, 99).join("").trimEnd() + "…" : normalized;',
+      '\t\t}',
+    ].join('\n'),
+    '\t\t/* presentProcessTitle 已随过程标题接管撤销删除。 */',
+  )
 
   // 诊断：把过程组的开合也投影到 DOM（验证 A 生效与否用，零视觉影响）
   out = swap(
@@ -1445,6 +2279,12 @@ function patchClient(source) {
       '\t\t\tapplyThinkSettings();',
       '\t\t\tensureThinkPanelStyle();',
       '\t\t\tensureTurnProcessClockStyle();',
+      '\t\t\t/* 治本：图片解码前写好宽高比占位，让内容高度不再分两帧定型。 */',
+      '\t\t\tconst uninstallImagePlaceholder = installImagePlaceholder();',
+      '\t\t\t/* 兜底：挤掉 1 帧窗口仍然发生时，把位置补回底部（不是每次都需要）。 */',
+      '\t\t\tconst uninstallImageSettle = installImageSettle();',
+      '\t\t\tconst unwatchImageSettleSessions = watchImageSettleSessions();',
+      '\t\t\tctx.effect(() => () => { uninstallImagePlaceholder(); uninstallImageSettle(); unwatchImageSettleSessions(); }, "dsh-stream-think: image placeholder + settle");',
       '\t\t\tctx.inject(["uiConversation"], (conversationCtx) => installBtwCommandVisibility(conversationCtx.uiConversation.events));',
       '\t\t\tif (ctx !== null && ctx !== void 0 && ctx.slots && typeof ctx.slots.inject === "function") {',
       '\t\t\t\tctx.slots.inject("settings.plugins.tab", () => ctx.slots.register({',
@@ -1458,7 +2298,7 @@ function patchClient(source) {
   )
 
   // 设置块本身的注入点（在 apply 之前，保证 apply 里能引用到）
-  out = swap(out, 'client/settings-block-insert', '\t\tfunction apply(ctx) {', THINK_SETTINGS_BLOCK + '\t\tfunction apply(ctx) {')
+  out = swap(out, 'client/settings-block-insert', '\t\tfunction apply(ctx) {', THINK_SETTINGS_BLOCK + IMAGE_PLACEHOLDER + IMAGE_SETTLE + '\t\tfunction apply(ctx) {')
   out = swap(
     out,
     'client/all-rows-share-scroll-setting',

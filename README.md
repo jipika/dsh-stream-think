@@ -12,11 +12,13 @@
 上游构建产物保存在本包的 `vendor/dsh-smooth-stream`，派生脚本默认从这里生成。
 若新插件尚无本地设置，会读取旧思考盒的展开、收起和预览行数偏好。
 
-**拥有**：`assistant-step` 渲染（打字机式正文流、跟随、折线渐隐）＋ **Think 行的
-全部展开行为**（何时自动展开、何时自动收起、展开多大、读者手动切换后谁说了算）。
+**拥有**：Think 行的**全部展开行为**（何时自动展开、何时自动收起、读者手动切换后谁说了算）
+＋ 过程组的八类分组摘要 ＋ `/btw` 旁问卡片。
+**不再拥有滚动**：跟随器整条停用，会话滚动完全交回官方（见「2026-10-07 滚动一律交回官方」）。
 **不再需要**：`dsh-smooth-stream`、`@jipika/dsh-think-ux`（两者都已从 profile 的
 `dsh.profile.bundles` 摘除）。
 **回滚**：从 profile 的 `dsh.profile.bundles` 移除 `dsh-stream-think`；如需旧插件，需重新安装。
+插件内部的回滚点是 `git checkout -- lib/ tools/`（`lib/*.js` 是派生产物，随时可由 `tools/derive.mjs` 重放）。
 
 ---
 
@@ -63,7 +65,82 @@ DSH `0.2.0-rc.2` 的官方 Chat 渲染器（`@deepseek-ai/dsh-client-ui-chat`）
 
 ---
 
+## 2026-10-07 滚动一律交回官方（当前形态）
+
+**跟随器整条停用。** 插件不再对会话滚动做任何事：不写 `scrollTop`、不改
+`overflowAnchor` / `scrollBehavior`、不造底部预留（runway / settle 的
+`marginTop` / `paddingBottom`、flow-fill 的 `minHeight`）、不给消息行做
+`transform` 位移补偿、不做会话隔离与交接。滚动、以及滚动过程中的一切观感，
+完全由官方 `[data-conversation-scroll]` 的自带逻辑决定。
+
+随之停用的还有两处「只为滚动服务」的东西：
+
+| 停用 | 原因 |
+| --- | --- |
+| 打字机式正文流（`useSmoothStreamContent` 的逐字揭示）+ 工具行逐字（`useProgressiveDomText`） | 逐字会让内容每帧增长，把官方跟随逼成离散步进；关掉后正文按 token 到达整段出现，观感最接近原生 |
+| 对数渐隐（`useLogarithmicFade`）、消息行入场 glide（entrance）、跟随脉冲 | 都是逐字/跟随的副产物，没有逐字就没有它们 |
+
+**仍然保留**（这些都不碰滚动）：Think 行的自动展开 / 结束后自动收起 / 读者优先、
+过程组八类分组摘要（任务 / 目标 / 文件编辑 / 思考摘录 / 命令 / 读取 / 搜索 / 其他工具）、
+`/btw` 旁问卡片、`aria-label` 诊断探针。
+
+### 2026-10-07 追加：图片占位（治本「先上去再下来」）
+
+用户的原始症状是「切过去在底部偏上、**先上去再下来**」。实测（8ms + rAF 双采样）取证到：
+
+```
+t=1290ms  top=1761  sh=2501  行0高=118   ← 内容暂定（图片还没就位）
+t=1408ms  top=1745  sh=2789  行0高=406   ← 内容涨高，位置被留在 1745（"先上去"）
+t=1410ms  top=2049  sh=2789              ← 官方 ResizeObserver 修正（"再下来"）
+```
+
+`1745` **不是任何 JS 写入的**（setter 劫持证明全部写入只有 1785 与 2049，都精确到底）——
+它是内容高度变化时浏览器的位置保持。而官方靠 `ResizeObserver` 观察内容列，
+**必须等布局提交后才收到通知**，这一帧窗口必然被渲染出来。
+
+**治法**：让图片容器的**高度从第一帧就正确**，内容高度不再是「先矮后高」。
+
+关键教训（踩了才明白）：**占位要写在容器 `button.codexImageThumb` 上，不能写在 `img` 上**。
+因为 `MessageImagePreview` 首帧只渲染「…」文本，`<img>` 要等异步 `loadImage` 完成才插入；
+而 button 在单图模式下是 `height:auto`。实测对比：
+
+| 占位位置 | 图片插入前 | 插入后 | 结果 |
+| --- | --- | --- | --- |
+| 写在 `img` 上 | 34px | 322px | ❌ +288px 撑高 |
+| **写在 `button` 上** | **323px** | **323px** | ✅ 零增长 |
+
+高度 = 容器实测宽 × 图片比例（单图容器 240px），超过官方 `max-height:320px` 时截断。
+尺寸来自 React fiber 的 `image.attachment.width/height`（渲染时就带着，同步可读）。
+
+**实测效果**：8/8 冷启动**零偏上帧**（改前 8/8 各有 1 帧偏上 304px）。
+轨迹从 `1761/2501 → 1745/2789 → 2049/2789` 变成 `2050/2790` 一步到位。
+
+**同时撤销：原生计时行接管**（用户同日要求）。过程行的计时文字、过程标题过渡
+整体交回官方，插件不再读按钮标签、不再渲染 `clock-overlay`、不再做数字逐位动画；
+相关的 6 条 CSS、2 个 keyframes、`clockLabelParts` / `canAnimateClockChange` /
+`presentProcessTitle` 三个函数一并删除。**摘要不受影响** —— 它本来就是独立的一套
+（`highlights` 状态 + `processHighlights` 读取 + `.dsh-stream-think-highlights` 渲染）。
+容器 div 与类名 `dsh-stream-think-clock` 保留：摘要只用
+`.dsh-stream-think-clock:has(.dsh-stream-think-highlights)` 做样式钩子，改名要连带改
+6 条选择器而收益为零。
+
+实现方式：`tools/derive.mjs` 的「滚动一律交回官方」段与「原生计时行接管：撤销」段
+（段内注释写明了每条锚点的出处），滚动侧 11 处、计时侧 12 处具名补丁。
+
+验证：`node tools/assert-scroll-disabled.mjs`。它用不动点闭包证明**产物里没有任何
+运行时可达的宿主滚动/几何写入**（当前：14 个写点函数全部落进 50 个成员的停用区，
+或由状态守卫证明必然 no-op），逐条核对停用痕迹，并断言计时行接管痕迹已消失、
+八类摘要渲染符号完好。改动任何一条相关补丁后，这个脚本都必须重跑。
+
+`controlScroll` 设置项及其「跟随动画」开关已无对象（跟随不再由本插件执行）：
+字段与开关保留，但不再有任何运行时效果。
+
+---
+
 ## 2026-10-04（晚）`controlScroll` 收窄为纯「跟随动画」开关
+
+> 已被上面 2026-10-07 的改动取代：跟随器整体停用，本节的开关语义不再生效，
+> 仅留作派生脚本的补丁出处说明。
 
 跟随**始终**由本插件执行（effect 开头的 `if (!controlScroll) return;` 已删除），开关只决定动画形式：
 
@@ -249,11 +326,12 @@ DSH 0.2 的分类记录直接订阅当前轮的原生节点数据，首次显示
 以及为它压制外层过程组限高的两条 CSS）已全部删除 —— 现在由官方的过程组滚动盒接管：
 `max-height:min(400px,50vh)` + `overflow-y:auto` + 1px 阈值平滑贴底 + 上下渐隐遮罩。
 
-### 过程计时（2026-10-04 已停止数字过渡）
+### 过程计时（2026-10-07 接管已整体撤销）
 
 DSH 0.2.0-rc.1 将运行中的「深度求索中，用时…」移到会话末尾的 `[data-chat-running]` 状态行；
-`turn-process` 只显示已结束轮次的用时。两处现在都按官方原样渲染：每秒刷新、等宽数字、
-**没有过渡动画**（插件原先的 220ms 数字上滚与 240ms 标题翻页已不再被调用）。
+`turn-process` 只显示已结束轮次的用时。两处现在**完全按官方原样渲染**，插件不再介入
+（220ms 数字上滚、240ms 标题翻页先于 2026-10-04 停止调用，2026-10-07 连同读标签的
+observer、`clock-overlay` 层、相关 CSS 与三个辅助函数一起删除）。
 
 ---
 
@@ -262,7 +340,7 @@ DSH 0.2.0-rc.1 将运行中的「深度求索中，用时…」移到会话末�
 | 半边 | 文件 | 职责 |
 | --- | --- | --- |
 | Host | `lib/index.js` | boot config 桥（把 profile 里的 `mode/preset/...` 注入页面）+ 设置 RPC（`/stream-think`）+ 设置卡（设置 → 插件配置 → 流式输出） |
-| Client | `lib/client.js` | `assistant-step` 渲染接管（流式正文 + Think 行）、原生过程计时数字过渡、`settings.plugins.tab` 的**思考盒**设置页 |
+| Client | `lib/client.js` | `assistant-step` 渲染接管（Think 行展开/收起；正文按 token 整段出）、过程组八类摘要、`settings.plugins.tab` 的**思考盒**设置页 |
 
 Client 半边派生自内置的 `vendor/dsh-smooth-stream`（上游 `dsh-smooth-stream@0.6.1` 构建产物，MIT，见 `LICENSE.upstream`），
 Host 半边同理。**所有差异都由 `tools/derive.mjs` 具名补丁生成**，不是手改 bundle。
@@ -288,6 +366,9 @@ node tools/derive.mjs --check
 # 2. 重新派生 lib/client.js 与 lib/index.js
 node tools/derive.mjs
 node tools/derive.mjs --source /path/to/node_modules/dsh-smooth-stream   # 指定源
+
+# 2.5 不变式：无可达滚动写入（除 image-settle）+ 图片占位只写尺寸 + 计时行撤销 + 摘要完好
+node tools/assert-scroll-disabled.mjs
 
 # 3. 冒烟测试：真实加载两个半边 + isReasoningLive 真值表
 node tools/smoke-test.mjs
@@ -327,14 +408,15 @@ Host 半边需要 `@deepseek-ai/schemastery`（宿主提供）。link 安装时�
 - **与 `dsh-theme-manager`**：消息行保留 DSH 的原生隐藏行为。主题统一层不对
   `_flowItem` 设置 `content-visibility:auto` 或估算占位高度；这些规则会覆盖
   `hidden="until-found"`，使旧步骤漏出并在会话切换时改变布局。
-- **与 `dsh-plugin-polish`**：流式滚动跟随归本插件（`controlScroll`），
-  会话位置恢复归 DSH；polish 不再接管滚动，`--dsh-scrollbar-width` 仍以 polish 为准。
+- **与 `dsh-plugin-polish`**：本插件自 2026-10-07 起不再触碰会话滚动（跟随器整条停用），
+  滚动与位置恢复都归官方与 polish；`--dsh-scrollbar-width` 仍以 polish 为准。
 - **与 `dsh-think-ux`**：**互斥，不要同时启用**。老插件用合成点击 toggle
   `[data-disclosure-row]`，本插件用 React state 控制同一行 —— 同时开会在结算时互相
   抵消（一个收起、另一个又点开）。已从 bundles 摘除。
 - **与 `dsh-smooth-stream`**：同理互斥（同 id 的渲染接管 + 同一设置卡）。
   已从 bundles 摘除。
-- 限高预览与 polish 的全局滚动条隐藏共存：框内滚动仍然可用（滚轮 / 触控板 / 键盘）。
+- 官方过程组的内部滚动盒（`max-height` + `overflow-y:auto`）与本插件无关，一直由官方提供；
+  跟随器停用后，框内滚动、会话滚动都属于原生路径。
 
 ---
 

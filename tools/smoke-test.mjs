@@ -120,6 +120,10 @@ const windowObj = {
   clearTimeout,
   requestAnimationFrame: (cb) => setTimeout(() => cb(Date.now()), 0),
   cancelAnimationFrame: (id) => clearTimeout(id),
+  // image-settle 需要在 window 上注册 load/error/scroll/wheel/keydown：
+  // 冒烟的假 DOM 只需要「可注册 / 可注销」，不需要真的派发。
+  addEventListener() {},
+  removeEventListener() {},
 }
 
 const sandbox = {
@@ -209,6 +213,8 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
     // connection 服务才能构造（mock 下 card.getSnapshot() 为 null 会抛）。本测试
     // 验证的是「bundle 能构造 + 我们的设置面板/样式在 apply 里注册成功」。
     inject: () => {},
+    // image-settle 在 apply 里用 ctx.effect 注册清理；mock 里收集起来即可。
+    effect: (fn) => { registered.push('effect'); return typeof fn === 'function' ? fn() : () => {} },
     slots: {
       inject: (name, cb) => { registered.push(name); return cb() },
       register: (options, component) => {
@@ -240,9 +246,9 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
     bad('关闭跟随', 'Element.prototype 的滚动方法被改写')
   }
   if (clockEntry.component.name === 'ProcessHighlightsView' && toolEntry.component.name === 'TypewriterFollowNodeView') {
-    ok('原生计时行使用专用数字动画，工具行保留流式包装')
+    ok('过程行保留摘要包装（计时数字接管已于 2026-10-07 撤销），工具行保留流式包装')
   } else {
-    bad('计时行包装', `${clockEntry.component.name} / ${toolEntry.component.name}`)
+    bad('过程行包装', `${clockEntry.component.name} / ${toolEntry.component.name}`)
   }
   if (reactKind === 'stub') {
     let liveRow = clockEntry.component({ node: { kind: 'turn-process', data: { turn: 7 }, location: { turn: { status: 'open' } } } })
@@ -251,10 +257,17 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
     else bad('0.2 空白过程行', String(liveRow?.type))
   }
   const clockStyle = cssTags.get('dsh-stream-think-turn-process-clock')
-  if (clockStyle?.textContent.includes('prefers-reduced-motion:reduce') && clockStyle.textContent.includes('font-variant-numeric:tabular-nums')) {
-    ok('计时样式含等宽数字和减少动态效果支持')
+  // 计时数字接管撤销后，样式表里不该再有 clock-overlay / 数字动画 / 等宽数字改写；
+  // 摘要需要的两条（data-live-empty 收高、highlights 布局）必须还在。
+  if (clockStyle !== undefined
+    && !clockStyle.textContent.includes('dsh-stream-think-clock-overlay')
+    && !clockStyle.textContent.includes('dsh-stream-think-clock-number')
+    && !clockStyle.textContent.includes('dsh-stream-think-clock-in')
+    && clockStyle.textContent.includes('dsh-stream-think-highlights')
+    && clockStyle.textContent.includes('.dsh-stream-think-clock[data-live-empty]')) {
+    ok('计时行接管痕迹已从样式表移除，摘要所需规则仍在')
   } else {
-    bad('计时样式', '未注入或缺少减少动态效果/等宽数字规则')
+    bad('计时样式表', '仍有 clock 接管残留，或摘要规则被误删')
   }
   if (reactKind === 'stub' && typeof settingsPanelComponent === 'function') {
     const findTestId = (node, id) => {
@@ -337,36 +350,26 @@ try {
   ok('BTW 适配支持延迟注册，保持节点身份，其他命令不变且卸载恢复')
 } catch (error) { bad('BTW 原生命令适配', error) }
 
-/* ---------------- 4a. 计时与过程组标题过渡边界 ---------------- */
+/* ---------------- 4a. 过程摘要与分类边界（计时数字接管已于 2026-10-07 撤销） ---------------- */
 
-const clockStart = clientSource.indexOf('function clockLabelParts(label) {')
+// 计时数字接管撤销后，clockLabelParts/canAnimateClockChange/presentProcessTitle 都不再存在；
+// 这段改为从摘要工具的起点切到过程行包装函数，验证摘要函数仍然可用。
+const clockStart = clientSource.indexOf('function editPathsFromToolNode(node) {')
 const clockEnd = clientSource.indexOf('function wrapTurnProcessClockNodeView(', clockStart)
-if (clockStart < 0 || clockEnd < 0) {
-  bad('计时过渡函数提取', '产物里找不到计时函数')
+const clockGone = ['function clockLabelParts(', 'function canAnimateClockChange(', 'function presentProcessTitle('].filter((n) => clientSource.includes(n))
+if (clockGone.length > 0) {
+  bad('计时行接管未撤销', `仍在产物里: ${clockGone.join(', ')}`)
+} else if (clockStart < 0 || clockEnd < 0) {
+  bad('摘要函数提取', '产物里找不到摘要函数区间')
 } else {
+  ok('计时数字接管已撤销（clockLabelParts / canAnimateClockChange / presentProcessTitle 均已删除）')
   const thoughtSelectorStart = clientSource.indexOf('function selectThoughtSummary(text) {')
   const thoughtSelectorEnd = clientSource.indexOf('function AnimatedReasoning({', thoughtSelectorStart)
   if (thoughtSelectorStart < 0 || thoughtSelectorEnd < 0) bad('思考摘要选择函数提取', '产物里找不到摘要选择函数')
   else vm.runInContext(clientSource.slice(thoughtSelectorStart, thoughtSelectorEnd), sandbox)
   vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function AnimatedReasoning({')), sandbox)
-  const { canAnimateClockChange, presentProcessTitle, editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
-    clientSource.slice(clockStart, clockEnd) + '\n; ({ canAnimateClockChange, presentProcessTitle, editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot })', sandbox)
-  if (presentProcessTitle('正在分析请求 · 尝试： ```js JSON.stringify({ ctx: document.body.innerText })') === '正在分析请求 · 代码片段' && [...presentProcessTitle('正在分析请求 · ' + '很长的标题'.repeat(30))].length <= 100) ok('原生活动详情含代码时收成短标题，普通长标题限制长度')
-  else bad('过程标题代码溢出', '代码块或长标题未被收短')
-  const cases = [
-    ['同一秒不重复动画', '深度求索中，用时34秒', '深度求索中，用时34秒', false],
-    ['秒数递增滚动', '深度求索中，用时34秒', '深度求索中，用时35秒', true],
-    ['进位数字滚动', '深度求索中，用时59秒', '深度求索中，用时60秒', true],
-    ['位数增加直接更新', '深度求索中，用时9秒', '深度求索中，用时10秒', false],
-    ['切后台跳秒直接更新', '深度求索中，用时34秒', '深度求索中，用时40秒', false],
-    ['结束状态直接更新', '深度求索中，用时34秒', '用时34秒', false],
-    ['时间单位变化直接更新', '深度求索中，用时59秒', '深度求索中，用时1分0秒', false],
-  ]
-  for (const [name, before, after, want] of cases) {
-    const got = canAnimateClockChange(before, after)
-    if (got === want) ok(name)
-    else bad(name, `期望 ${want}，实际 ${got}`)
-  }
+  const { editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
+    clientSource.slice(clockStart, clockEnd) + '\n; ({ editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot })', sandbox)
   const result = (name, argsRaw, isError = false) => ({ kind: 'tool-result', callId: name, isError, call: { name, argsRaw }, subCalls: [] })
   const toolNode = (root) => ({ kind: 'tool-call', data: { root } })
   const edits = [
@@ -547,7 +550,7 @@ if (clockStart < 0 || clockEnd < 0) {
   }
   const wrapTurnProcessClockNodeView = vm.runInNewContext(
     clientSource.slice(clockEnd, wrapperEnd) + '\n; wrapTurnProcessClockNodeView',
-    { react: fakeReact, getThinkSettings: () => selectedSettings, subscribeThinkSettings() {}, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, clockLabelParts: () => [], canAnimateClockChange: () => false, MutationObserver: HighlightObserver, requestAnimationFrame: (callback) => { pendingFrames.push(callback); return pendingFrames.length }, cancelAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {} },
+    { react: fakeReact, getThinkSettings: () => selectedSettings, subscribeThinkSettings() {}, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, MutationObserver: HighlightObserver, requestAnimationFrame: (callback) => { pendingFrames.push(callback); return pendingFrames.length }, cancelAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {} },
   )
   const TurnProcess = wrapTurnProcessClockNodeView(() => null)
   const props = { node: { data: { turn: 7 }, location: { turn: { status: 'closed' } } }, turnProcess: { open: false } }
@@ -569,7 +572,9 @@ if (clockStart < 0 || clockEnd < 0) {
     return findKind(tree?.children ?? [], kind)
   }
   renderPinned()
-  layoutEffects[1]()
+  // 计时数字接管撤销后只剩一个 layoutEffect（读摘要），不再按下标取第二个。
+  if (layoutEffects.length !== 1) bad('过程行 effect 数量', `期望 1（只读摘要），实际 ${layoutEffects.length}`)
+  layoutEffects[0]()
   const pinnedTask = findKind(renderPinned(), 'task')
   selectedSettings = allOff
   const turnedOff = findKind(renderPinned(), 'task')
@@ -605,7 +610,7 @@ if (clockStart < 0 || clockEnd < 0) {
   hookSlots.length = 0
   const liveProps = { ...props, node: { ...props.node, location: { turn: { status: 'open' } } }, turnProcess: { open: true } }
   renderPinned(liveProps)
-  layoutEffects[1]()
+  layoutEffects[0]()
   const liveTask = findKind(renderPinned(liveProps), 'task')
   if (findClass(liveTask, 'dsh-stream-think-highlight-preview')?.children?.[0]?.includes('新增 2 · 移除 0')) ok('运行中已完成的工具记录实时显示在对话里')
   else bad('运行中工具外显', '原生 turn-process 尚未显示时，分类记录未渲染')
@@ -627,7 +632,7 @@ if (clockStart < 0 || clockEnd < 0) {
   } }
   const nativeProps = { ...liveProps, useChat: (select) => select({ nodes: nativeStore }) }
   const nativeFirst = renderPinned(nativeProps)
-  layoutEffects[1]()
+  layoutEffects[0]()
   if (findKind(nativeFirst, 'task') && !findKind(nativeFirst, 'thought') && observedScopes.length === observedBefore && requestedTurns.every((turn) => turn === 7)) ok('0.2 首次提交已有分类，无需等待工具 DOM；订阅仅限当前轮')
   else bad('原生数据首次渲染', `task=${!!findKind(nativeFirst, 'task')} thought=${!!findKind(nativeFirst, 'thought')} observers=${observedScopes.length-observedBefore}`)
   taskSnapshot = [{ root: { ...result('todo_write', JSON.stringify({ todos: [{ content: '核对最后状态', status: 'completed' }] })), callId: 'native-task' } }]
@@ -900,8 +905,397 @@ if (toggleSeg.includes('if (!running) userToggledRef.current = true;')) ok('推�
 else bad('自动收起语义', 'onToggle 缺少「仅已完成的思考才设读者豁免」分支')
 }
 
-/* ---------------- 5. Host 半边导入 ---------------- */
+/* ---------------- 4a2. image-placeholder：图片宽高比占位的准入条件真值表 ----------------
+ *
+ * 治本路径。只测 applyImagePlaceholder 的判定（不依赖真实布局）：
+ * 用一个假 img + 假 fiber 就能完整表达场景。
+ */
+{
+  const P_START = clientSource.indexOf('const IMAGE_PLACEHOLDER_ATTR =')
+  const P_END = clientSource.indexOf('function installImagePlaceholder()', P_START)
+  if (P_START < 0 || P_END < 0) {
+    bad('image-placeholder 提取', '产物里找不到占位模块')
+  } else {
+    let applied = 0
+    const makeImg = (opts = {}) => {
+      const attrs = new Set(opts.attrs ?? [])
+      const img = {
+        tagName: 'IMG',
+        nodeType: 1,
+        naturalWidth: opts.naturalWidth ?? 0,
+        naturalHeight: opts.naturalHeight ?? 0,
+        complete: opts.complete ?? false,
+        style: { aspectRatio: opts.aspectRatio ?? '' },
+        parentElement: null,
+        hasAttribute: (n) => attrs.has(n),
+        setAttribute: (n) => attrs.add(n),
+        matches: () => true,
+        querySelectorAll: () => [],
+      }
+      if (opts.fiber) {
+        // 模拟 fiber：props.image.attachment.width/height
+        img.__reactFiber$test = { memoizedProps: { image: { attachment: opts.fiber } }, return: null }
+      }
+      return img
+    }
+    const sandbox = {
+      HTMLImageElement: class { constructor() { this.__isImg = true } },
+      performance: { now: () => 1000 },
+      document: { body: { nodeType: 1 }, addEventListener() {}, removeEventListener() {} },
+      MutationObserver: class { observe() {} disconnect() {} },
+      window: { addEventListener() {}, removeEventListener() {} },
+      Object, String, Number, Set,
+    }
+    const api = vm.runInNewContext(
+      clientSource.slice(P_START, P_END) + '\n; ({ applyImagePlaceholder, readDeclaredImageSize, readLoadedImageSize })',
+      sandbox,
+    )
+    // 让 instanceof 判定通过：把假 img 的 prototype 指向沙箱里的 HTMLImageElement
+    const asReal = (img) => { Object.setPrototypeOf(img, sandbox.HTMLImageElement.prototype); return img }
 
+    // 场景1：未解码 + fiber 有尺寸 → 写占位（治本核心）
+    const i1 = asReal(makeImg({ complete: false, fiber: { width: 858, height: 1096 } }))
+    const r1 = api.applyImagePlaceholder(i1)
+    const s1 = r1 === true && i1.style.aspectRatio === '858 / 1096'
+
+    // 场景2：已解码的图 → 不写（无意义的样式写入）
+    const i2 = asReal(makeImg({ complete: true, naturalWidth: 800, naturalHeight: 600, fiber: { width: 800, height: 600 } }))
+    const r2 = api.applyImagePlaceholder(i2)
+    const s2 = r2 === false && i2.style.aspectRatio === ''
+
+    // 场景3：已有其它比例来源 → 让位，不覆盖
+    const i3 = asReal(makeImg({ complete: false, aspectRatio: '4 / 3', fiber: { width: 858, height: 1096 } }))
+    const r3 = api.applyImagePlaceholder(i3)
+    const s3 = r3 === false && i3.style.aspectRatio === '4 / 3'
+
+    // 场景4：读不到尺寸 → 放弃（绝不猜比例）
+    const i4 = asReal(makeImg({ complete: false }))
+    const r4 = api.applyImagePlaceholder(i4)
+    const s4 = r4 === false && i4.style.aspectRatio === ''
+
+    // 场景5：已写过标记 → 不重复写
+    const i5 = asReal(makeImg({ complete: false, attrs: ['data-stream-think-ratio'], fiber: { width: 10, height: 20 } }))
+    const r5 = api.applyImagePlaceholder(i5)
+    const s5 = r5 === false && i5.style.aspectRatio === ''
+
+    // 场景6：未解码但自然尺寸已就绪（部分缓存命中）→ 用 natural 兜底
+    const i6 = asReal(makeImg({ complete: false, naturalWidth: 640, naturalHeight: 480 }))
+    const r6 = api.applyImagePlaceholder(i6)
+    const s6 = r6 === true && i6.style.aspectRatio === '640 / 480'
+
+    const table = [
+      ['未解码 + fiber 有尺寸 → 写占位', s1],
+      ['已解码的图 → 不写（无意义写入）', s2],
+      ['已有比例来源 → 让位不覆盖', s3],
+      ['读不到尺寸 → 放弃（不猜比例）', s4],
+      ['已写过标记 → 不重复写', s5],
+      ['未解码 + natural 就绪 → 用 natural 兜底', s6],
+    ]
+    for (const [name, pass] of table) {
+      if (pass) ok(name)
+      else bad(name, '占位准入条件不符')
+    }
+  }
+}
+
+/* ---------------- 4a3. image-placeholder：容器占位（治本路径）真值表 ----------------
+ *
+ * 关键教训（实测得来）：占位必须写在**容器 button** 上，不能写在 img 上。
+ * 因为 MessageImagePreview 首帧只渲染「…」文本、img 是异步 loadImage 后才插入的，
+ * 而 button 是 height:auto —— 写 img 拦不住「先塌后撑」（34px → 322px），
+ * 写 button 才能让行高第一帧就正确（323px → 323px，零增长）。
+ */
+{
+  const B_START = clientSource.indexOf('const IMAGE_PLACEHOLDER_ATTR =')
+  const B_END = clientSource.indexOf('function readLoadedImageSize(img)', B_START)
+  if (B_START < 0 || B_END < 0) {
+    bad('image-placeholder 容器提取', '产物里找不到容器占位模块')
+  } else {
+    const makeBox = (opts = {}) => {
+      const attrs = new Set(opts.attrs ?? [])
+      const box = {
+        tagName: 'BUTTON',
+        nodeType: 1,
+        style: { height: opts.height ?? '' },
+        parentElement: null,
+        hasAttribute: (n) => attrs.has(n),
+        setAttribute: (n) => attrs.add(n),
+        getBoundingClientRect: () => ({ width: opts.width ?? 240 }),
+        querySelector: () => null,
+      }
+      if (opts.fiber) box.__reactFiber$test = { memoizedProps: { image: { attachment: opts.fiber } }, return: null }
+      return box
+    }
+    let applied = 0
+    const sandbox = {
+      HTMLElement: class {},
+      HTMLImageElement: class {},
+      performance: { now: () => 1000 },
+      document: { body: { nodeType: 1 }, addEventListener() {}, removeEventListener() {} },
+      MutationObserver: class { observe() {} disconnect() {} },
+      window: {},
+      Object, String, Number, Math, Set,
+    }
+    const api = vm.runInNewContext(
+      clientSource.slice(B_START, B_END) + '\n; ({ applyImageBoxPlaceholder, readDeclaredImageSize })',
+      sandbox,
+    )
+    const asEl = (o) => { Object.setPrototypeOf(o, sandbox.HTMLElement.prototype); return o }
+
+    // 场景1：有 fiber 尺寸 + 已布局出宽 → 写 height = 240 * 1096/858 ≈ 306.6，截断到 320
+    const b1 = asEl(makeBox({ fiber: { width: 858, height: 1096 } }))
+    const ok1 = api.applyImageBoxPlaceholder(b1)
+    const s1 = ok1 === true && /^3\d\d(\.\d+)?px$/.test(b1.style.height) && Math.abs(parseFloat(b1.style.height) - (240 * 1096 / 858)) < 0.5
+
+    // 场景2：比例算出来超过 320 → 截断
+    const b2 = asEl(makeBox({ fiber: { width: 100, height: 900 } }))   // 240*9 = 2160 > 320
+    api.applyImageBoxPlaceholder(b2)
+    const s2 = b2.style.height === '320px'
+
+    // 场景3：已有 height → 让位
+    const b3 = asEl(makeBox({ height: '100px', fiber: { width: 858, height: 1096 } }))
+    const r3 = api.applyImageBoxPlaceholder(b3)
+    const s3 = r3 === false && b3.style.height === '100px'
+
+    // 场景4：还没布局出宽度 → 放弃（不猜）
+    const b4 = asEl(makeBox({ width: 0, fiber: { width: 858, height: 1096 } }))
+    const r4 = api.applyImageBoxPlaceholder(b4)
+    const s4 = r4 === false && b4.style.height === ''
+
+    // 场景5：读不到尺寸 → 放弃
+    const b5 = asEl(makeBox({}))
+    const r5 = api.applyImageBoxPlaceholder(b5)
+    const s5 = r5 === false && b5.style.height === ''
+
+    // 场景6：已写过标记 → 跳过
+    const b6 = asEl(makeBox({ attrs: ['data-stream-think-ratio'], fiber: { width: 10, height: 10 } }))
+    const r6 = api.applyImageBoxPlaceholder(b6)
+    const s6 = r6 === false && b6.style.height === ''
+
+    const table = [
+      ['容器占位：按比例算出 height', s1],
+      ['容器占位：超过 320px 截断', s2],
+      ['容器占位：已有 height → 让位', s3],
+      ['容器占位：未布局出宽度 → 不猜', s4],
+      ['容器占位：读不到尺寸 → 放弃', s5],
+      ['容器占位：已写过标记 → 跳过', s6],
+    ]
+    for (const [name, pass] of table) {
+      if (pass) ok(name)
+      else bad(name, '容器占位准入条件不符')
+    }
+  }
+}
+
+/* ---------------- 4b. image-settle：图片撑高后补回底部的六道闸门真值表 ----------------
+ *
+ * 只测 settleAfterImage 的判定逻辑（不依赖真实 DOM 布局）：给一个假的 port，
+ * 用 scrollHeight / scrollTop / clientHeight 三个数字就能完整表达场景。
+ * 期望：只有「撑高前贴底 + 读者静默 + 窗口内 + 未补过」才写 scrollTop。
+ */
+{
+  const start = clientSource.indexOf('const IMAGE_SETTLE_ARMED_MS =')
+  const end = clientSource.indexOf('function watchImageSettleSessions()', start)
+  if (start < 0 || end < 0) {
+    bad('image-settle 提取', '产物里找不到 image-settle 常量区')
+  } else {
+    // 可调的假时钟与设置
+    let now = 1000
+    let enabled = true
+    let readerAt = -1e9
+    const pendingTimers = []
+    const makeSandbox = () => ({
+      performance: { now: () => now },
+      Date: { now: () => now },
+      getThinkSettings: () => ({ imageSettle: enabled }),
+      requestAnimationFrame: () => 0,
+      MutationObserver: class { observe() {} disconnect() {} },
+      // 补位前有「让官方先走一步」的延迟（IMAGE_SETTLE_ENTER_DELAY_MS）；
+      // 用可手动冲刷的定时器把它推完，测试才能看到补位动作。
+      setTimeout: (fn) => { pendingTimers.push(fn); return pendingTimers.length }, clearTimeout: () => {},
+      document: { querySelector: () => null, addEventListener() {}, removeEventListener() {} },
+      window: { addEventListener() {}, removeEventListener() {} },
+      HTMLImageElement: class {},
+      WeakMap, Set,
+      __readerAt: () => readerAt,
+    })
+    // 只取「常量 + 纯函数」段：避开需要 DOM 的 install/watch
+    const pureEnd = clientSource.indexOf('function installImageSettle()', start)
+    const src = clientSource.slice(start, pureEnd)
+    const sandbox2 = makeSandbox()
+    // noteImageSettleReaderIntent 内部写的是模块级变量，用同名注入让其可控
+    const api = vm.runInNewContext(
+      src + '\n; ({ settleAfterImage, armImageSettle, imageSettleSnapshot, noteImageSettleReaderIntent, imageSettleEnabled, imageSettleAtBottom, imageSettleState })',
+      sandbox2,
+    )
+
+    // 造一个假 port：只需 scrollTop/scrollHeight/clientHeight + isConnected + closest
+    const makePort = (h, top, client = 700) => ({
+      scrollHeight: h, scrollTop: top, clientHeight: client, isConnected: true,
+      closest: (sel) => (sel === "[data-conversation-session]" ? { getAttribute: () => 's1' } : null),
+      matches: () => true,
+    })
+    const grow = (port, newH) => { port.scrollHeight = newH }
+    const atBottom = (port) => Math.abs(port.scrollTop - Math.max(0, port.scrollHeight - port.clientHeight)) <= 2
+    // 把「让官方先走一步」的延迟推完，再断言最终位置
+    const flush = () => { const queued = pendingTimers.splice(0); for (const fn of queued) fn() }
+
+    // 场景1：图片撑高 + 撑高前贴底 + 无读者意图 → 应补回底部
+    now = 2000
+    const p1 = makePort(2000, 1300)
+    api.armImageSettle(p1)          // 取基线：h=2000, top=1300, 贴底
+    grow(p1, 2288)                  // 图片撑高 288px（实测值）
+    api.settleAfterImage(p1, { currentSrc: 'a.png' })
+    flush()
+    const s1 = atBottom(p1) && p1.scrollTop === 1588
+
+    // 场景1b：撑高后官方**自己**已贴底 → 我们不该写（零介入）
+    now = 2500
+    const p1b = makePort(2000, 1300)
+    api.armImageSettle(p1b)
+    grow(p1b, 2288)
+    p1b.scrollTop = 1588            // 官方在这一拍内已经补好
+    api.settleAfterImage(p1b, { currentSrc: 'a2.png' })
+    const before1b = p1b.scrollTop
+    flush()
+    const s1b = p1b.scrollTop === before1b && atBottom(p1b)
+
+    // 场景2：撑高前不在底部（读者在中间）→ 绝不能动
+    now = 3000
+    const p2 = makePort(2000, 400)
+    api.armImageSettle(p2)
+    grow(p2, 2288)
+    api.settleAfterImage(p2, { currentSrc: 'b.png' })
+    flush()
+    const s2 = p2.scrollTop === 400
+
+    // 场景2b：读者停在离底 500px 处（撑高路径按 32px 容差判定 → 不动；
+    // 纠偏路径虽有 512 上限，但要求"内容已定型"，此场景内容刚被撑高 → 也不动）
+    now = 3100
+    const p2b = makePort(2000, 800)           // max=1300，离底 500
+    api.armImageSettle(p2b)
+    grow(p2b, 2288)                           // 撑高：内容刚变，纠偏路径应放行
+    api.settleAfterImage(p2b, { currentSrc: 'b2.png' })
+    flush()
+    const s2b = p2b.scrollTop === 800
+
+    // 场景2c：官方"位置保持补偿"把位置留在离底 16px（实测值）→ 应当视为
+    // 「读者本意就在底部」并补位，否则正是用户报的「底部偏上一点」被放走
+    now = 3200
+    const p2c = makePort(2000, 1244)          // 1500-... 制造离底 16px：max=1300 → top=1284
+    // 重新按真实数值构造：h=2000, client=700 → max=1300，离底 16 → top=1284
+    p2c.scrollTop = 1284
+    api.armImageSettle(p2c)                   // 基线：非贴底（16>2），但 slack<=32
+    // 模拟官方先贴到 1300（被观察到），再被补偿拉回 1284
+    p2c.scrollTop = 1300
+    api.settleAfterImage(p2c, { currentSrc: 'b3-pre.png' })   // 观察到贴底 → atBottom=true
+    p2c.scrollTop = 1284
+    grow(p2c, 2288)
+    api.settleAfterImage(p2c, { currentSrc: 'b3.png' })
+    flush()
+    const s2c = atBottom(p2c)
+
+    // 场景3：读者刚滚动过（静默期未过）→ 不补
+    now = 4000
+    const p3 = makePort(2000, 1300)
+    api.armImageSettle(p3)
+    api.noteImageSettleReaderIntent()   // 读者意图发生在 now=4000
+    grow(p3, 2288)
+    api.settleAfterImage(p3, { currentSrc: 'c.png' })
+    flush()
+    const s3 = p3.scrollTop === 1300
+
+    // 场景4：超出会话观察窗口 → 彻底撒手
+    now = 5000
+    const p4 = makePort(2000, 1300)
+    api.armImageSettle(p4)              // 武装时刻 now=5000
+    grow(p4, 2288)
+    now = 5000 + 8001                    // 超过 ARMED_MS
+    api.settleAfterImage(p4, { currentSrc: 'd.png' })
+    flush()
+    const s4 = p4.scrollTop === 1300
+
+    // 场景5：开关关闭 → 不补
+    now = 20000
+    enabled = false
+    const p5 = makePort(2000, 1300)
+    api.armImageSettle(p5)
+    grow(p5, 2288)
+    api.settleAfterImage(p5, { currentSrc: 'e.png' })
+    flush()
+    const s5 = p5.scrollTop === 1300
+    enabled = true
+
+    // 场景6：高度没变（图片无关的抖动）→ 不写
+    now = 30000
+    const p6 = makePort(2000, 1300)
+    api.armImageSettle(p6)
+    api.settleAfterImage(p6, { currentSrc: 'f.png' })   // 高度未变
+    flush()
+    const s6 = p6.scrollTop === 1300
+
+    // 场景7：同一次撑高重复触发 → 只补一次（第二次不再写）
+    now = 40000
+    const p7 = makePort(2000, 1300)
+    api.armImageSettle(p7)
+    grow(p7, 2288)
+    api.settleAfterImage(p7, { currentSrc: 'g.png' })
+    flush()
+    const firstApplied = p7.scrollTop === 1588
+    p7.scrollTop = 100                     // 模拟官方/读者又把它挪走
+    api.settleAfterImage(p7, { currentSrc: 'g.png' })   // 同一高度 + 同一图
+    flush()
+    const s7 = firstApplied && p7.scrollTop === 100
+
+    // 场景8：切会话纠偏 —— 官方把"偏上"值记住并忠实恢复（高度没变，撑高路径拦不住）
+    // 8a：贴底附近但没到底 + 内容定型 + 读者没动 → 纠偏到真底部
+    now = 50000
+    const p8 = makePort(2288, 1588)      // max=1588，却是被记住的偏上值 1284
+    p8.scrollTop = 1284                   // 离底 304（实测值）
+    api.armImageSettle(p8)
+    // 纠偏要求「两次复查看到同一位置」→ 需要推两轮定时器
+    flush(); flush()
+    const s8a = p8.scrollTop === 1588 && atBottom(p8)
+
+    // 8b：离底太远（读者本意停在中间，例如 600px > 512 上限）→ 不动
+    now = 51000
+    const p8b = makePort(2288, 1284)      // 离底 304 之外再远些
+    p8b.scrollTop = 688                    // 离底 600
+    api.armImageSettle(p8b)
+    flush(); flush()
+    const s8b = p8b.scrollTop === 688
+
+    // 8c：读者刚动过 → 纠偏让路
+    now = 52000
+    const p8c = makePort(2288, 1284)
+    api.armImageSettle(p8c)
+    api.noteImageSettleReaderIntent()
+    flush(); flush()
+    const s8c = p8c.scrollTop === 1284
+
+    const table = [
+      ['图片撑高 + 撑高前贴底 → 补回底部', s1],
+      ['切会话纠偏：记住的偏上值 → 补回真底部', s8a],
+      ['切会话纠偏：离底过远（读者本意）→ 不动', s8b],
+      ['切会话纠偏：读者刚动过 → 不动', s8c],
+      ['撑高后官方已自行贴底 → 零介入', s1b],
+      ['撑高前不在底部 → 不动', s2],
+      ['读者停在离底 100px → 不动（容差 32px 之外）', s2b],
+      ['官方补偿留下离底 16px → 仍补回底部（容差 32px 之内）', s2c],
+      ['读者刚滚动过 → 不动', s3],
+      ['超出观察窗口 → 不动', s4],
+      ['开关关闭 → 不动', s5],
+      ['高度未变化 → 不动', s6],
+      ['同一次撑高只补一次 → 第二次不动', s7],
+    ]
+    for (const [name, pass] of table) {
+      if (pass) ok(name)
+      else bad(name, '行为与闸门不符')
+    }
+  }
+}
+
+/* ---------------- 5. Host 半边导入 ---------------- */
 try {
   const host = await import('../lib/index.js')
   if (host.name === 'dsh-stream-think' && typeof host.apply === 'function' && host.Config !== undefined) ok('Host 半边导入与导出')
