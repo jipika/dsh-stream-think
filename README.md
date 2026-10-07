@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/icon.svg" width="72" alt="dsh-stream-think icon">
+</div>
+
 # dsh-stream-think
 
 > **流式输出（dsh-smooth-stream）+ 思考盒（dsh-think-ux）二合一**，把 Think 行的
