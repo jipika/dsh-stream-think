@@ -311,7 +311,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 			".dsh-stream-think-task-label{flex:none;color:var(--dsw-alias-label-caption);font-size:12px;white-space:nowrap}",
 			".dsh-stream-think-task-empty{margin:0;padding:9px 14px;color:var(--dsw-alias-label-caption)}",
 			".dsh-stream-think-highlight-thought{margin:2px 0 8px;padding:8px 10px;border-left:2px solid var(--dsw-alias-border-secondary,currentColor);border-radius:0 6px 6px 0;background:var(--dsw-alias-background-secondary,transparent);white-space:pre-wrap;overflow-wrap:anywhere}",
-			".dsh-stream-think-highlight-item[data-type=file]{text-decoration:underline dotted;text-underline-offset:3px}",
+			".dsh-stream-think-highlight-item[data-type=file],.dsh-stream-think-highlight-item[data-type=read]{text-decoration:underline dotted;text-underline-offset:3px}",
 			".dsh-stream-think-highlights button:hover{color:var(--dsw-alias-label-primary)}",
 			".dsh-stream-think-highlights button:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px;border-radius:2px}",
 			"@media (prefers-reduced-motion:reduce){.dsh-stream-think-highlight-body,.dsh-stream-think-highlight-list,.dsh-stream-think-highlight-chevron{transition:none}}",
@@ -394,6 +394,15 @@ const TURN_PROCESS_CLOCK = String.raw`
 			visit(node.data?.root, 0);
 			return [...paths];
 		}
+		function readTargetFields(args) {
+			/* 与官方 ToolRow 同口径：只认 path/file_path 字符串（官方 FILE_PATH_KEYS），首行截断；offset 正整数即打开行号（官方 readCallLine）。 */
+			const raw = typeof args.path === "string" && args.path.trim() !== "" ? args.path : typeof args.file_path === "string" && args.file_path.trim() !== "" ? args.file_path : void 0;
+			if (raw === void 0) return null;
+			const path = raw.split("\n")[0].trim();
+			if (path === "") return null;
+			const offset = args.offset;
+			return { path, ...typeof offset === "number" && Number.isInteger(offset) && offset >= 1 ? { line: offset } : {} };
+		}
 		function actionSummariesFromToolNode(node) {
 			if (node?.kind !== "tool-call") return [];
 			const actions = [];
@@ -431,7 +440,9 @@ const TURN_PROCESS_CLOCK = String.raw`
 							const normalized = raw.replace(/\s+/g, " ").trim();
 							text = [...normalized].length > 120 ? [...normalized].slice(0, 119).join("") + "…" : normalized;
 						}
-						actions.push({ id: String(block.callId ?? ""), kind, title, failed: block.isError === true, text: (block.isError ? "失败 · " : "") + text, ...!block.isError && todos !== null ? { todos } : {} });
+						/* read 家族里目录与网页不给可点路径（官方 list_dir 走 others、web_fetch 的 url 不是文件）：只留真实文件读取。 */
+						const target = kind === "read" && !["list_dir", "list_directory", "web_fetch"].includes(name) ? readTargetFields(args) : null;
+						actions.push({ id: String(block.callId ?? ""), kind, title, failed: block.isError === true, text: (block.isError ? "失败 · " : "") + text, ...target !== null ? target : {}, ...!block.isError && todos !== null ? { todos } : {} });
 					}
 				}
 				if (Array.isArray(block.subCalls)) for (const child of block.subCalls) visit(child, depth + 1);
@@ -741,6 +752,8 @@ const TURN_PROCESS_CLOCK = String.raw`
 													(0, react.createElement)("span", { className: "dsh-stream-think-task-content" }, todo.content),
 													(0, react.createElement)("span", { className: "dsh-stream-think-task-label" }, todo.status === "completed" ? "已完成" : todo.status === "in_progress" ? "进行中" : "待处理")))));
 											if (item.type === "file" && typeof props.openFile === "function") return (0, react.createElement)("button", { type: "button", key, className: "dsh-stream-think-highlight-item", "data-type": "file", tabIndex: open ? 0 : -1, title: item.path, onClick: () => props.openFile(item.path) }, item.text);
+											/* 读取/查看类条目保持官方工具行的点击能力：带路径就渲染成按钮，openFile(path[, {line}]) 打开侧边栏预览。 */
+											if (item.type === "action" && typeof item.action?.path === "string" && item.action.path !== "" && typeof props.openFile === "function") return (0, react.createElement)("button", { type: "button", key, className: "dsh-stream-think-highlight-item", "data-type": "read", tabIndex: open ? 0 : -1, title: item.action.path, onClick: () => typeof item.action.line === "number" ? props.openFile(item.action.path, { line: item.action.line }) : props.openFile(item.action.path) }, item.text);
 											return (0, react.createElement)("div", { key, className: "dsh-stream-think-highlight-text", "data-type": item.type, title: item.text }, item.text);
 										}))));
 						})));

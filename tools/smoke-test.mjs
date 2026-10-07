@@ -506,6 +506,15 @@ if (clockStart < 0 || clockEnd < 0) {
   const goalOnly = buildProcessHighlightGroups(visibleProcessHighlights({ files: [], thoughts: [], actions: [goalAction] }, { ...allOff, showGoals: true }), (path) => path)
   if (goalOnly.length === 1 && goalOnly[0].key === 'goal' && goalOnly[0].items[0].text === '创建目标 · 完成界面核查') ok('目标操作独立于任务清单')
   else bad('目标与清单语义', JSON.stringify(goalOnly))
+  const readAction = actionSummariesFromToolNode(toolNode(result('read', JSON.stringify({ file_path: '/work/notes.md', offset: 12 }))))[0]
+  const fetchAction = actionSummariesFromToolNode(toolNode(result('web_fetch', JSON.stringify({ url: 'https://example.com/a' }))))[0]
+  const listDirAction = actionSummariesFromToolNode(toolNode(result('list_dir', JSON.stringify({ path: '/work' }))))[0]
+  const imageAction = actionSummariesFromToolNode(toolNode(result('read_image', JSON.stringify({ file_path: '/work/shot.png' }))))[0]
+  const readGroup = buildProcessHighlightGroups(visibleProcessHighlights({ files: [], thoughts: [], actions: [readAction, fetchAction, listDirAction, imageAction] }, { ...allOff, showReads: true }), (path) => path)
+  const renderedReadButton = clientSource.includes('"data-type": "read"') && clientSource.includes('props.openFile(item.action.path, { line: item.action.line })')
+  if (readAction.path === '/work/notes.md' && readAction.line === 12 && imageAction.path === '/work/shot.png' && fetchAction.path === void 0 && listDirAction.path === void 0
+    && readGroup.length === 1 && readGroup[0].items.length === 4 && readGroup[0].items[0].action.path === '/work/notes.md' && renderedReadButton) ok('读取与查看条目保留官方点击能力：带路径渲染成按钮，openFile 打开预览')
+  else bad('读取条目可点击', JSON.stringify({ readAction, fetchAction: fetchAction.path, listDirAction: listDirAction.path, imageAction: imageAction.path, readGroup: readGroup[0]?.items.length, renderedReadButton }))
   const failedEditGroup = buildProcessHighlightGroups({ files: ['/work/a.ts'], thoughts: [], tasks: [], actions: [{ id: 'failed-edit', kind: 'edit', title: '编辑', text: '失败 · b.ts' }] }, (path) => path.slice('/work/'.length))[0]
   if (failedEditGroup.title.includes('1 次失败') && failedEditGroup.items.length === 2 && failedEditGroup.items[1].text === '失败 · b.ts') ok('同轮成功编辑和失败编辑都能看到')
   else bad('编辑失败记录', JSON.stringify(failedEditGroup))
