@@ -1514,6 +1514,26 @@ function removeUpstreamCardField(source, key) {
   return swap(source, `client/card-${key}`, source.slice(start, end + endMarker.length), '')
 }
 
+/**
+ * 按上游 bundler 输出的 //#region 边界整段删除一个模块（连同它的 CSS region）。
+ * 按 region 名定位而非行号，因此多个删除互不影响；边界缺失即记为失败。
+ */
+function removeRegion(source, name, regionName) {
+  const startMarker = `\t\t//#region ${regionName}\n`
+  const start = source.indexOf(startMarker)
+  if (start < 0) {
+    failures.push(`${name}: 找不到 region ${regionName}`)
+    return source
+  }
+  const endMarker = '\t\t//#endregion\n'
+  const end = source.indexOf(endMarker, start)
+  if (end < 0) {
+    failures.push(`${name}: region ${regionName} 缺 //#endregion`)
+    return source
+  }
+  return swap(source, name, source.slice(start, end + endMarker.length), '')
+}
+
 /* ────────────────────────────────────────────────────────────────────────────
  * 二、Client 半边补丁表
  * ──────────────────────────────────────────────────────────────────────────── */
@@ -2326,6 +2346,38 @@ function patchClient(source) {
   )
   out = removeUpstreamCardField(out, 'controlScroll')
   out = removeUpstreamCardField(out, 'thinkAutoExpand')
+
+  /* ── 用户要求「只保留摘要分组 + Think 展开 + 滚动」：摘掉上游设置卡与调试面板 ──
+   * 先摘两个 seat（引用方消失），再删四个视图 region。已核实：
+   *   · SmoothStreamCard_module_css_default ×71、DebugPanel_module_css_default ×35 全部落在各自 region 内；
+   *   · SmoothStreamCardController 与 debugRuntime 在这四个 region 里 0 引用 —— 前者仍是
+   *     SettingsCell.attach(card) 的设置数据源，后者被 teleprompterGlide 引用，两者都保留。 */
+  out = swap(
+    out,
+    'client/upstream-seats-removed',
+    [
+      '\t\t\t\tsettingsCtx.slots.inject("settings.plugin.item", () => settingsCtx.slots.register({',
+      '\t\t\t\t\tname: "settings.plugin.item",',
+      '\t\t\t\t\tid: "smooth-stream",',
+      '\t\t\t\t\tkey: STREAM_SETTINGS_NS,',
+      '\t\t\t\t\torder: 30,',
+      '\t\t\t\t\tlocale: NS,',
+      '\t\t\t\t\tinject: () => card.inject()',
+      '\t\t\t\t}, SmoothStreamCard));',
+      '\t\t\t\tsettingsCtx.slots.inject("conversation.session.header.utilities", () => settingsCtx.slots.register({',
+      '\t\t\t\t\tname: "conversation.session.header.utilities",',
+      '\t\t\t\t\tid: "smooth-stream-debug",',
+      '\t\t\t\t\torder: 40,',
+      '\t\t\t\t\tlocale: NS,',
+      '\t\t\t\t\tinject: () => debugRuntime.panelFace()',
+      '\t\t\t\t}, DebugPanel));',
+    ].join('\n'),
+    '\t\t\t\t/* 上游设置卡（settings.plugin.item）与调试面板（conversation.session.header.utilities）已摘除：只保留插件自己的「思考盒」设置页 */',
+  )
+  out = removeRegion(out, 'client/upstream-card-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/SmoothStreamCard.module.css.mjs')
+  out = removeRegion(out, 'client/upstream-card-view-removed', 'src/client/SmoothStreamCard.tsx')
+  out = removeRegion(out, 'client/debug-panel-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/DebugPanel.module.css.mjs')
+  out = removeRegion(out, 'client/debug-panel-view-removed', 'src/client/DebugPanel.tsx')
 
   return out
 }

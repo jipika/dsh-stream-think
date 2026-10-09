@@ -1318,11 +1318,27 @@ try {
   if (host.name === 'dsh-stream-think' && typeof host.apply === 'function' && host.Config !== undefined) ok('Host 半边导入与导出')
   else bad('Host 半边导出', 'name / apply / Config 不完整')
   const hostSource = readFileSync(join(ROOT, 'lib', 'index.js'), 'utf8')
-  if (hostSource.includes('maxRevealCps: 1800,') && hostSource.includes('maxRevealCps: Schema.number().min(120).max(2400)') && hostSource.includes('tuning.maxRevealCps <= 2400') && clientSource.includes('key: "maxRevealCps",\n\t\t\t\tlabel: "debugMaxReveal",\n\t\t\t\ttip: "debugTipMaxReveal",\n\t\t\t\tmin: 120,\n\t\t\t\tmax: 2400,')) {
-    ok('高速显示上限在客户端、Host 校验和调试面板保持一致')
+  if (hostSource.includes('maxRevealCps: 1800,') && hostSource.includes('maxRevealCps: Schema.number().min(120).max(2400)') && hostSource.includes('tuning.maxRevealCps <= 2400') && clientSource.includes('maxRevealCps: 1800,')) {
+    ok('高速显示上限在客户端默认值与 Host 校验保持一致（上游设置卡/调试面板已删，不再有对应控件）')
   } else bad('高速显示设置边界', '客户端与 Host 上限不一致')
 } catch (error) {
   bad('Host 半边导入', error)
+}
+
+/* ---------------- 6. 上游 UI 已摘除（只留摘要分组 + Think 展开 + 滚动） ---------------- */
+{
+  const gone = [
+    ['SmoothStreamCard_module_css_default', '上游设置卡视图'],
+    ['DebugPanel_module_css_default', '上游调试面板视图'],
+    ['"settings.plugin.item"', '上游设置卡 seat'],
+    ['"conversation.session.header.utilities"', '会话头部调试 seat'],
+  ]
+  const left = gone.filter(([needle]) => clientSource.includes(needle))
+  if (left.length === 0) ok('上游设置卡与调试面板已从产物移除（视图 + seat）')
+  else bad('上游 UI 移除', left.map(([needle, label]) => `${label}(${needle})`).join('、') + ' 仍存在')
+  if (clientSource.includes('SmoothStreamCardController') && clientSource.includes('settings.attach(card)')) {
+    ok('设置数据源仍保留（SmoothStreamCardController + SettingsCell.attach）')
+  } else bad('设置数据源', 'controller / SettingsCell 绑定被误删')
 }
 
 /* ---------------- 结果 ---------------- */
