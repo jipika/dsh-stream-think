@@ -989,12 +989,12 @@ const TURN_PROCESS_CLOCK = String.raw`
 				if (block === null || typeof block !== "object" || depth > 16) return;
 				if (block.kind === "tool-result") {
 					const name = block.call?.name;
-					const kind = name === "todo_write" ? "task" : ["create_goal", "update_goal", "get_goal"].includes(name) ? "goal" : ["bash", "pwsh", "run_code", "exec_command", "write_stdin"].includes(name) || name?.startsWith("terminal_") ? "command" : ["read", "read_file", "read_text_file", "read_image", "view_image", "list_dir", "list_directory", "web_fetch"].includes(name) ? "read" : ["web_search", "file_search", "search_files", "grep", "glob"].includes(name) || name?.endsWith("_inspect") ? "search" : ["edit", "write", "apply_patch", "str_replace_editor"].includes(name) ? "edit" : "other";
+					const kind = name === "advisor" ? "advisor" : name === "todo_write" ? "task" : ["create_goal", "update_goal", "get_goal"].includes(name) ? "goal" : ["bash", "pwsh", "run_code", "exec_command", "write_stdin"].includes(name) || name?.startsWith("terminal_") ? "command" : ["read", "read_file", "read_text_file", "read_image", "view_image", "list_dir", "list_directory", "web_fetch"].includes(name) ? "read" : ["web_search", "file_search", "search_files", "grep", "glob"].includes(name) || name?.endsWith("_inspect") ? "search" : ["edit", "write", "apply_patch", "str_replace_editor"].includes(name) ? "edit" : "other";
 					{
 						let args = {};
 						try { args = JSON.parse(block.call?.argsRaw ?? "{}"); } catch { /* Partial arguments: use tool name. */ }
 						if (args === null || typeof args !== "object") args = {};
-						const title = kind === "task" ? "任务清单" : kind === "goal" ? name === "create_goal" ? "创建目标" : name === "update_goal" ? "更新目标" : "查看目标" : kind === "command" ? "命令" : kind === "search" ? "搜索" : kind === "read" ? "读取" : kind === "edit" ? "编辑" : String(name ?? "工具");
+						const title = kind === "advisor" ? "第二模型复核" : kind === "task" ? "任务清单" : kind === "goal" ? name === "create_goal" ? "创建目标" : name === "update_goal" ? "更新目标" : "查看目标" : kind === "command" ? "命令" : kind === "search" ? "搜索" : kind === "read" ? "读取" : kind === "edit" ? "编辑" : String(name ?? "工具");
 						let text;
 						let todos = null;
 						if (name === "todo_write" && Array.isArray(args.todos)) {
@@ -1122,7 +1122,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 				files: settings.showEditedFiles ? highlights.files : [],
 				thoughts: settings.showThoughtSummary ? highlights.thoughts : [],
 				tasks: settings.showTaskUpdates ? highlights.actions.filter((action) => action.kind === "task") : [],
-				actions: highlights.actions.filter((action) => action.kind === "edit" ? settings.showEditedFiles : action.kind === "goal" ? settings.showGoals : action.kind === "command" ? settings.showCommands : action.kind === "read" ? settings.showReads : action.kind === "search" ? settings.showSearches : action.kind === "other" && settings.showOtherTools)
+				actions: highlights.actions.filter((action) => action.kind === "advisor" ? settings.showAdvisor : action.kind === "edit" ? settings.showEditedFiles : action.kind === "goal" ? settings.showGoals : action.kind === "command" ? settings.showCommands : action.kind === "read" ? settings.showReads : action.kind === "search" ? settings.showSearches : action.kind === "other" && settings.showOtherTools)
 			};
 		}
 		function briefProcessText(text) {
@@ -1135,7 +1135,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 			const actionItems = (actions) => actions.map((action) => {
 				const failed = action.failed && action.text.startsWith("失败 · ");
 				const detail = failed ? action.text.slice(5) : action.text;
-				const labeled = ["other", "goal"].includes(action.kind) ? (failed ? "失败 · " : "") + action.title + (detail === action.title ? "" : " · " + detail) : action.text;
+				const labeled = ["other", "goal", "advisor"].includes(action.kind) ? (failed ? "失败 · " : "") + action.title + (detail === action.title ? "" : " · " + detail) : action.text;
 				return { type: action.kind === "task" && Array.isArray(action.todos) ? "task" : "action", text: labeled, action };
 			});
 			const add = (key, title, items, preview) => {
@@ -1162,6 +1162,8 @@ const TURN_PROCESS_CLOCK = String.raw`
 			add("goal", "目标操作 " + goals.length + " 次", actionItems(goals), goals.at(-1)?.text ?? "");
 			const thoughts = visible.thoughts.map((thought, index) => ({ type: "thought", text: thought.summary || "第 " + (index + 1) + " 段思考", content: thought.content }));
 			add("thought", "思考摘录 " + thoughts.length + " 段", thoughts, visible.thoughts.findLast((thought) => thought.summary !== "")?.summary ?? "");
+			const advisors = actionsOf("advisor");
+			add("advisor", "第二模型复核 " + advisors.length + " 次", actionItems(advisors), advisors.at(-1)?.text ?? "");
 			const others = actionsOf("other");
 			add("other", "其他工具 " + others.length + " 项", actionItems(others), others.at(-1)?.text ?? "");
 			return groups;
@@ -1349,7 +1351,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t//#region dsh-stream-think: 思考行展开设置（localStorage，不依赖 Host）',
   '\t\t/** 展开/收起/预览行数全部由本插件决定，改完立刻生效，不需要重启。 */',
   '\t\tconst THINK_SETTINGS_KEY = "dsh-stream-think:settings.v1";',
-  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, imageSettle: true, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false };',
+  '\t\tconst THINK_SETTINGS_DEFAULTS = { autoExpand: true, autoCollapse: true, controlScroll: true, imageSettle: true, showTaskUpdates: true, showGoals: true, showEditedFiles: true, showThoughtSummary: true, showCommands: true, showReads: false, showSearches: false, showOtherTools: false, showAdvisor: true };',
   '\t\tconst thinkSettingsListeners = new Set();',
   '',
   '\t\tfunction readThinkSettings() {',
@@ -1370,7 +1372,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\t\telse if (typeof parsed.showLookups === "boolean") out.showReads = parsed.showLookups;',
   '\t\t\t\t\t\tif (typeof parsed.showSearches === "boolean") out.showSearches = parsed.showSearches;',
   '\t\t\t\t\t\telse if (typeof parsed.showLookups === "boolean") out.showSearches = parsed.showLookups;',
-  '\t\t\t\t\t\tif (typeof parsed.showOtherTools === "boolean") out.showOtherTools = parsed.showOtherTools;',
+  '\t\t\t\t\t\tif (typeof parsed.showOtherTools === "boolean") out.showOtherTools = parsed.showOtherTools;\n\t\t\t\t\t\tif (typeof parsed.showAdvisor === "boolean") out.showAdvisor = parsed.showAdvisor;',
   '\t\t\t\t\t\t// groupAutoExpand / toolSummary 已废弃：过程行注入会把思考盒带坏，不再读取',
   '\t\t\t\t\t\tif (typeof parsed.controlScroll === "boolean") out.controlScroll = parsed.controlScroll;',
   '\t\t\t\t\t\tif (typeof parsed.imageSettle === "boolean") out.imageSettle = parsed.imageSettle;',
@@ -1476,7 +1478,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\tswitchBtn(s.showReads, "在对话中显示读取记录", "stream-think-show-reads", () => updateThinkSettings({ showReads: !s.showReads }))),',
   '\t\t\t\trow("showSearches", "搜索", "显示文件搜索和网页搜索；默认关闭",',
   '\t\t\t\t\tswitchBtn(s.showSearches, "在对话中显示搜索记录", "stream-think-show-searches", () => updateThinkSettings({ showSearches: !s.showSearches }))),',
-  '\t\t\t\trow("showOtherTools", "其他工具", "显示未归入以上类别的工具调用；默认关闭",',
+  '\t\t\t\trow("showAdvisor", "第二模型复核", "advisor 工具（第二模型复核）独立成组；默认显示",\n\t\t\t\t\tswitchBtn(s.showAdvisor, "在对话中显示第二模型复核", "stream-think-show-advisor", () => updateThinkSettings({ showAdvisor: !s.showAdvisor }))),\n\t\t\t\trow("showOtherTools", "其他工具", "显示未归入以上类别的工具调用；默认关闭",',
   '\t\t\t\t\tswitchBtn(s.showOtherTools, "在对话中显示其他工具", "stream-think-show-other-tools", () => updateThinkSettings({ showOtherTools: !s.showOtherTools }))));',
   '\t\t}',
   '\t\t//#endregion',
