@@ -1832,6 +1832,9 @@ function patchClient(source) {
     ].join('\n'),
     '\t\t/* boot 配置桥已随打字机渲染器移除：客户端不再读 __DSH_STREAM_THINK_CONFIG__。 */',
   )
+  // 第四批（上游设置数据源链）必须排在所有补丁之后执行 —— 它的 anchor 依赖
+  // client/upstream-seats-removed 写下的注释与 client/all-rows-share-scroll-setting
+  // 重写后的 useControlScroll，见文件末尾。
 
   /* ── Think 行交回官方（不再有自动展开，也没有插件那套摘录）─────────────────
    * 用户拍板「Think 自动展开去掉、摘录恢复官方」：删掉 assistant-step 的 -100 注册，
@@ -2504,6 +2507,84 @@ function patchClient(source) {
   out = removeRegion(out, 'client/upstream-card-view-removed', 'src/client/SmoothStreamCard.tsx')
   out = removeRegion(out, 'client/debug-panel-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/DebugPanel.module.css.mjs')
   out = removeRegion(out, 'client/debug-panel-view-removed', 'src/client/DebugPanel.tsx')
+
+  /* ── 死代码清理（第四批：上游设置数据源链）—— 必须放在所有补丁之后 ──────────────
+   * SettingsCell + SmoothStreamCardController 一直在按 RPC 轮询上游设置，但自从
+   * assistant-step 交回官方后这些值已经没有消费者 —— 全量核对过 useControlScroll 只剩
+   * 三处：apply 里的定义、本处调用、wrapAgentChatRows 的形参（它唯一的使用点
+   * wrapFollowNodeView(inner, useControlScroll) 已在 06f4995 被三元替换掉）。
+   * anchor 用的是「上面全部补丁跑完」之后的文本：useControlScroll 已被
+   * client/all-rows-share-scroll-setting 重写，两个 seat 已变成注释。
+   * 删掉这一块后，SmoothStreamCardController / createSmoothStreamSettingsApi /
+   * settings-api / clientStore / locales 五个 region 才会失去引用。 */
+  out = swap(
+    out,
+    'client/settings-cell-removed',
+    [
+      '\t\t\tconst settings = new SettingsCell();',
+      '\t\t\tconst useControlScroll = () => (0, react.useSyncExternalStore)(subscribeThinkSettings, () => getThinkSettings().controlScroll, () => getThinkSettings().controlScroll);',
+    ].join('\n'),
+    '\t\t\t/* 上游设置数据源（SettingsCell + 卡片控制器）已摘除：只用自己的本地设置。 */',
+  )
+  out = swap(out, 'client/wrap-agent-rows-no-scroll-arg', 'const unwrap = wrapAgentChatRows(ctx, useControlScroll);', 'const unwrap = wrapAgentChatRows(ctx);')
+  out = swap(
+    out,
+    'client/settings-data-source-removed',
+    [
+      '\t\t\tctx.inject([',
+      '\t\t\t\t"slots",',
+      '\t\t\t\t"locale",',
+      '\t\t\t\t"connection"',
+      '\t\t\t], (settingsCtx) => {',
+      '\t\t\t\tconst card = new SmoothStreamCardController(createSmoothStreamSettingsApi(settingsCtx.get("connection")));',
+      '\t\t\t\tconst detachSettings = settings.attach(card);',
+      '\t\t\t\tconst syncDebug = () => {',
+      '\t\t\t\t\tconst snapshot = card.getSnapshot();',
+      '\t\t\t\t\tdebugRuntime.syncSettings({',
+      '\t\t\t\t\t\tavailable: snapshot.debugAvailable,',
+      '\t\t\t\t\t\tenabled: snapshot.debugEnabled,',
+      '\t\t\t\t\t\twritable: snapshot.writable && !snapshot.saving,',
+      '\t\t\t\t\t\tdirty: snapshot.dirty,',
+      '\t\t\t\t\t\tstatus: snapshot.status,',
+      '\t\t\t\t\t\ttuning: snapshot.debugTuning',
+      '\t\t\t\t\t});',
+      '\t\t\t\t};',
+      '\t\t\t\tconst detachBinding = debugRuntime.bindSettings({',
+      '\t\t\t\t\tedit: (patch) => {',
+      '\t\t\t\t\t\tcard.inject().edit(patch);',
+      '\t\t\t\t\t},',
+      '\t\t\t\t\tsave: () => {',
+      '\t\t\t\t\t\tcard.inject().save();',
+      '\t\t\t\t\t},',
+      '\t\t\t\t\tdiscard: () => {',
+      '\t\t\t\t\t\tcard.inject().discard();',
+      '\t\t\t\t\t}',
+      '\t\t\t\t});',
+      '\t\t\t\tconst detachDebug = card.subscribe(syncDebug);',
+      '\t\t\t\tsyncDebug();',
+      '\t\t\t\tcard.start();',
+      '\t\t\t\tsettingsCtx.effect(() => settingsCtx.locale.register(NS, {',
+      '\t\t\t\t\tzh,',
+      '\t\t\t\t\ten',
+      '\t\t\t\t}), "dsh-stream-think: settings dictionaries");',
+      '\t\t\t\t/* 上游设置卡（settings.plugin.item）与调试面板（conversation.session.header.utilities）已摘除：只保留插件自己的「思考盒」设置页 */',
+      '\t\t\t\treturn () => {',
+      '\t\t\t\t\tcard.stop();',
+      '\t\t\t\t\tdetachDebug();',
+      '\t\t\t\t\tdetachSettings();',
+      '\t\t\t\t\tdetachBinding();',
+      '\t\t\t\t};',
+      '\t\t\t});',
+    ].join('\n'),
+    '\t\t\t/* 上游设置数据源已摘除：settings RPC / locale 词典 / 调试绑定都不再需要。 */',
+  )
+  // 引用方消失后，这五个 region 的外部引用全部归零（settings-api / settings-api-client /
+  // clientStore 三者互相引用，必须一起删）。
+  out = removeRegion(out, 'client/card-controller-removed', 'src/client/smooth-stream-card-controller.ts')
+  out = removeRegion(out, 'client/settings-api-removed', 'src/settings-api.ts')
+  out = removeRegion(out, 'client/settings-api-client-removed', 'src/client/smooth-stream-settings-api.ts')
+  // clientStore.ts 暂不能删：createSnapshotStore 还被 debugRuntime.ts 引用（跟随器批一起处理）。
+  out = removeRegion(out, 'client/locales-removed', 'src/client/locales.ts')
 
   return out
 }

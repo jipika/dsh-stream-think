@@ -1334,9 +1334,9 @@ try {
   const left = gone.filter(([needle]) => clientSource.includes(needle))
   if (left.length === 0) ok('上游设置卡与调试面板已从产物移除（视图 + seat）')
   else bad('上游 UI 移除', left.map(([needle, label]) => `${label}(${needle})`).join('、') + ' 仍存在')
-  if (clientSource.includes('SmoothStreamCardController') && clientSource.includes('settings.attach(card)')) {
-    ok('设置数据源仍保留（SmoothStreamCardController + SettingsCell.attach）')
-  } else bad('设置数据源', 'controller / SettingsCell 绑定被误删')
+  if (!clientSource.includes('new SettingsCell()') && !clientSource.includes('settings.attach(card)') && !clientSource.includes('SmoothStreamCardController')) {
+    ok('上游设置数据源已移除（不再有空转的 settings RPC 轮询与 locale 词典）')
+  } else bad('设置数据源清理', 'SettingsCell / controller 仍留在产物里')
 }
 
 /* ---------------- 结果 ---------------- */
