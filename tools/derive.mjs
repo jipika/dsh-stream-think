@@ -1692,6 +1692,25 @@ function patchClient(source) {
   )
   out = swap(out, 'client/animate-auto-collapse', 'bodyTransition: !autoClosed,', 'bodyTransition: !reduced,')
 
+  // 用户明确不要「收起态 Think 摘录」：整个 collapsedContent 置空，收起时只剩图标 + 标题 + 展开箭头。
+  // summary / summaryRef / thinkSummary 的 CSS 都保留（不再渲染即无影响），单点改动以免上游升级时锚点漂移。
+  out = swap(
+    out,
+    'client/think-summary-removed',
+    [
+      '\t\t\t\t\t\tcollapsedContent: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
+      '\t\t\t\t\t\t\tclassName: TypewriterAssistantNodeView_module_css_default.thinkSeparator,',
+      '\t\t\t\t\t\t\t"aria-hidden": true',
+      '\t\t\t\t\t\t}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
+      '\t\t\t\t\t\t\tref: summaryRef,',
+      '\t\t\t\t\t\t\tclassName: TypewriterAssistantNodeView_module_css_default.thinkSummary,',
+      '\t\t\t\t\t\t\t"data-follow-end": running || void 0,',
+      '\t\t\t\t\t\t\tchildren: summary',
+      '\t\t\t\t\t\t})] }),',
+    ].join('\n'),
+    '\t\t\t\t\t\tcollapsedContent: void 0,',
+  )
+
   // 八类摘要里的「思考摘录」类目依赖这个选句函数（行内摘录组件已移除）。
   out = swap(out, 'client/thought-summary-picker-insert', '\t\tfunction AnimatedReasoning({', THOUGHT_SUMMARY_PICKER + '\t\tfunction AnimatedReasoning({')
 

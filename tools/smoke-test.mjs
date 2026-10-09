@@ -854,6 +854,23 @@ if (queueStart < 0 || queueEnd < 0) {
   } else bad('高速流式吞吐', `8 秒后积压 ${backlog} 字符`)
 }
 
+// 收起态 Think 行不渲染摘录（用户明确不要该功能）：collapsedContent 必须是 void 0，
+// 且驱动摘录的 thinkSummary / data-follow-end 不再出现在渲染代码里。
+const reasoningStart = clientSource.indexOf('function AnimatedReasoning({')
+const reasoningEnd = clientSource.indexOf('function TypewriterAssistantNodeView(', reasoningStart)
+if (reasoningStart < 0 || reasoningEnd < 0) {
+  bad('Think 行摘录移除', '找不到 AnimatedReasoning 区间')
+} else {
+  const reasoningBody = clientSource.slice(reasoningStart, reasoningEnd)
+  const collapsed = reasoningBody.match(/collapsedContent: ([^,\n]+),/)
+  const leftover = reasoningBody.includes('thinkSummary') || reasoningBody.includes('"data-follow-end"')
+  if (collapsed !== null && collapsed[1] === 'void 0' && !leftover) {
+    ok('收起态 Think 行不渲染摘录（collapsedContent 为空，无 thinkSummary/data-follow-end）')
+  } else {
+    bad('Think 行摘录移除', `collapsedContent=${collapsed?.[1]} 残留摘录标记=${leftover}`)
+  }
+}
+
 const foldStart = clientSource.indexOf('function FoldableReasoning({')
 const foldEnd = clientSource.indexOf('function firstLine(', foldStart)
 if (foldStart < 0 || foldEnd < 0) {

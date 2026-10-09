@@ -31,7 +31,7 @@ DSH `0.2.0-rc.2` 的官方 Chat 渲染器（`@deepseek-ai/dsh-client-ui-chat`）
 | --- | --- |
 | 思考体限高预览：`capLines` 4/12/24/48/不限、`[data-think-cap]`、推理期「跟到框底」、设置页那一段 | 过程组 body `max-height:min(400px,50vh)` + `overflow-y:auto` + 1px 阈值平滑贴底 + 上下渐隐遮罩 |
 | 「展开 Think 时取消外层过程组限高与遮罩」的两条 CSS | 官方那套限高正是 0.2 的原生设计，不再压制 |
-| 收起态 Think 行的摘录翻页组件（`RollingThinkSummary`） | 官方 `latestCompletedParagraphFirstLine` 摘录 + TextShimmer 高光 + 右端 48px 渐隐 |
+| 收起态 Think 行的摘录翻页组件（`RollingThinkSummary`）；**2026-10-09 起这一行的摘录本身也不再渲染** | 官方 `latestCompletedParagraphFirstLine` 摘录 + TextShimmer 高光 + 右端 48px 渐隐（插件以 `priority: -100` 接管 `assistant-step` 后，这条官方分支不会执行） |
 | 过程计时数字 220ms 上滚、过程组标题 240ms 翻页 | 官方每秒刷新 + 等宽数字、无过渡（`installLiveRunningClock` / `installProcessTitleFlip` 只剩未被调用的定义） |
 | ~~外层会话滚动跟随~~ **2026-10-04 晚改回插件执行，但语义收窄为「跟随动画」** | 见下节：跟随始终由本插件执行，`controlScroll` 只切「平滑 / 瞬时」；官方 `toBottom(..., "instant")` 那条链仅作为对照 |
 
@@ -262,16 +262,14 @@ running: streaming && isReasoningLive(data.blocks, index),
 宿主原本会在过程组收起时隐藏作答步骤里的 inline reasoning。这是 DSH 的折叠规则，
 不是本插件新增的折叠。本插件以前照搬这个 `hidden` 判定，导致内层 Think 虽然已展开，
 外层仍把它藏住。现在对**当前正在生成的 reasoning**放行；一段思考结束后，
-本轮仍在执行时保留一行摘录，避免旧行先消失、下一行后出现造成会话上下跳动。
+本轮仍在执行时这一行继续占位（只是不再带摘录文字），避免旧行先消失、下一行后出现造成会话上下跳动。
 整轮结束后等待内层收起动画结束，再交还宿主折叠。关闭「自动收起」时，Think 的内层保持展开；
 宿主过程组本身仍可折叠，对话中保留分类摘要。插件不再调用 `turnProcess.setOpen()` 抢过程组状态，
 避免列表反复伸缩。
 
-收起状态的 Think 摘录最多占一行。插件从最近的内容中选取有具体信息的句子，
-跳过「调用。」「开始。」等空泛短句；整段都没有可用摘录时只显示 Think，
-点开仍能看到原文。切换到新句时，旧文字向下离开、新文字从上方进入，
-轨道裁切让两句不重叠；同一句持续添字直接更新，避免高速 token 流中反复重启动画。
-横向跟随每帧最多更新一次，不在 React 提交时强制读取布局。完成后沿用同一选句规则。
+收起状态的 Think 行只显示图标与标题，**不渲染任何摘录文字**（2026-10-09 起，用户明确不要这个功能）；
+点开后仍是完整原文。`collapsedContent` 置空，`summary` / `summaryRef` 与 `thinkSummary` 的 CSS 保留但不再参与渲染。
+`selectThoughtSummary` 只服务于过程组的「思考摘录」分组（那是另一套，未受影响）。
 
 DSH 0.2 截图中的「正在分析请求 · …」是**原生过程组标题**。插件保留它的按钮、
 图标和读屏文字；停顿后的标题变化才播放 240 毫秒翻页，连续变化合并到最新文字，
