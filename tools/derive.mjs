@@ -1780,6 +1780,59 @@ function patchClient(source) {
   out = removeRegion(out, 'client/tool-node-view-removed', 'src/client/TypewriterToolNodeView.tsx')
   out = removeRegion(out, 'client/agent-row-entrance-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/AgentRowEntrance.module.css.mjs')
 
+  /* ── 死代码清理（第三批：打字机渲染器与 boot 配置桥）────────────────────────
+   * StreamConfiguredView 自 06f4995（assistant-step 交回官方）起不再被注册；
+   * 它引用的 boot 配置（readBootConfig）随之只剩一个调用点。anchor 用「补丁表跑完
+   * 之后」的文本，因此 configured 块里已是 thinkPrefs.* 形态。 */
+  out = swap(
+    out,
+    'client/typewriter-configured-view-removed',
+    [
+      '\t\t\tconst configured = function StreamConfiguredView(props) {',
+      '\t\t\t\tconst preferences = (0, react.useSyncExternalStore)(settings.subscribe, settings.getSnapshot, settings.getSnapshot);',
+      '\t\t\t\treturn (0, react.createElement)(TypewriterAssistantNodeView, {',
+      '\t\t\t\t\t...props,',
+      '\t\t\t\t\tmode: config.mode,',
+      '\t\t\t\t\tpreset: config.preset,',
+      '\t\t\t\t\trevealCharsPerSec: config.revealCharsPerSec,',
+      '\t\t\t\t\tscrollSpeedPxPerSec: config.scrollSpeedPxPerSec,',
+      '\t\t\t\t\tmaxScrollSpeedPxPerSec: config.maxScrollSpeedPxPerSec,',
+      '\t\t\t\t\tthinkAutoExpand: preferences.thinkAutoExpand,',
+      '\t\t\t\t\tlogarithmicFade: preferences.logarithmicFade,',
+      '\t\t\t\t\tcontrolScroll: preferences.controlScroll,',
+      '\t\t\t\t\tmotionPreference: preferences.motionPreference',
+      '\t\t\t\t});',
+      '\t\t\t};',
+    ].join('\n'),
+    '\t\t\t/* 打字机渲染器已交回官方：StreamConfiguredView 死代码移除。 */',
+  )
+  /* boot 配置行已由 client/apply-settings-panel 一并去掉（打字机渲染器不再需要它）。 */
+  out = swap(
+    out,
+    'client/boot-config-removed',
+    [
+      '\t\t/**',
+      '\t\t* Read the Host-bridged boot config. The inline script is produced by this',
+      "\t\t* plugin's Host half from a schema-validated value, so only the structural",
+      '\t\t* guarantees that could break between the two halves are re-checked: the',
+      '\t\t* global is absent when the client runs without its Host entry (defaults',
+      '\t\t* apply), and any present-but-malformed value fails loudly instead of',
+      '\t\t* rendering a half-configured view.',
+      '\t\t* @returns The resolved configuration for the assistant node view.',
+      '\t\t*/',
+      '\t\tfunction readBootConfig() {',
+      '\t\t\tconst raw = globalThis[STREAM_BOOT_GLOBAL];',
+      '\t\t\tif (raw === void 0) {',
+      '\t\t\t\tconsole.info("[dsh-stream-think] no host config bridge; using defaults");',
+      '\t\t\t\treturn DEFAULT_STREAM_CONFIG;',
+      '\t\t\t}',
+      '\t\t\tif (typeof raw !== "object" || raw === null || !STREAM_MODES.includes(raw.mode) || !STREAM_PRESETS.includes(raw.preset) || typeof raw.revealCharsPerSec !== "number" || typeof raw.scrollSpeedPxPerSec !== "number" || typeof raw.maxScrollSpeedPxPerSec !== "number") throw new Error(`[dsh-stream-think] malformed ${STREAM_BOOT_GLOBAL} boot global: ${JSON.stringify(raw)}`);',
+      '\t\t\treturn raw;',
+      '\t\t}',
+    ].join('\n'),
+    '\t\t/* boot 配置桥已随打字机渲染器移除：客户端不再读 __DSH_STREAM_THINK_CONFIG__。 */',
+  )
+
   /* ── Think 行交回官方（不再有自动展开，也没有插件那套摘录）─────────────────
    * 用户拍板「Think 自动展开去掉、摘录恢复官方」：删掉 assistant-step 的 -100 注册，
    * 官方 ReasoningRow 因此回归（默认收起、运行中/结算后自带一行摘录、点开才看全文）。
@@ -2375,37 +2428,8 @@ function patchClient(source) {
     ].join('\n'),
   )
 
-  // 设置来源：本插件的本地设置说了算（上游开关不再参与与运算）
-  out = swap(
-    out,
-    'client/configured-subscribe',
-    [
-      '\t\t\tconst configured = function StreamConfiguredView(props) {',
-      '\t\t\t\tconst preferences = (0, react.useSyncExternalStore)(settings.subscribe, settings.getSnapshot, settings.getSnapshot);',
-    ].join('\n'),
-    [
-      '\t\t\tconst configured = function StreamConfiguredView(props) {',
-      '\t\t\t\tconst preferences = (0, react.useSyncExternalStore)(settings.subscribe, settings.getSnapshot, settings.getSnapshot);',
-      '\t\t\t\tconst thinkPrefs = (0, react.useSyncExternalStore)(subscribeThinkSettings, getThinkSettings, getThinkSettings);',
-    ].join('\n'),
-  )
-  // 流式跟随（滚动动画的所有权）也收进本插件的设置里
-  out = swap(
-    out,
-    'client/control-scroll-source',
-    '\t\t\t\t\tcontrolScroll: preferences.controlScroll,',
-    '\t\t\t\t\tcontrolScroll: thinkPrefs.controlScroll,',
-  )
-
-  out = swap(
-    out,
-    'client/configured-props',
-    '\t\t\t\t\tthinkAutoExpand: preferences.thinkAutoExpand,',
-    [
-      '\t\t\t\t\tthinkAutoExpand: thinkPrefs.autoExpand,',
-      '\t\t\t\t\tthinkAutoCollapse: thinkPrefs.autoCollapse,',
-    ].join('\n'),
-  )
+  // 打字机渲染器（StreamConfiguredView + boot 配置）已作为死代码整段移除：
+  // configured-subscribe / control-scroll-source / configured-props 三条补丁的宿主随之消失。
 
   // 设置面板注册 + 把行数投影到 CSS 变量
   out = swap(
@@ -2417,7 +2441,6 @@ function patchClient(source) {
     ].join('\n'),
     [
       '\t\tfunction apply(ctx) {',
-      '\t\t\tconst config = readBootConfig();',
       '\t\t\tapplyThinkSettings();',
       '\t\t\tensureThinkPanelStyle();',
       '\t\t\tensureTurnProcessClockStyle();',
