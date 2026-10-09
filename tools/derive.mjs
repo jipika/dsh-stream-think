@@ -1450,20 +1450,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\treturn h("div", { className: "dsh-stream-think-set" },',
   '\t\t\t\th("div", { className: "dsh-stream-think-set-desc" },',
   '\t\t\t\t\t"勾选的类别会直接出现在对话中，各类独立合并，点击标题展开；原生过程组的折叠不影响这些分类。修改立即生效并保存在本机。"),',
-  '\t\t\t\trow("autoExpand", "生成时自动展开 Think",',
-  '\t\t\t\t\ts.autoExpand',
-  '\t\t\t\t\t\t? "模型推理时展开该条 Think（默认）"',
-  '\t\t\t\t\t\t: "已关闭：当前 Think 收起，需要时手动点开",',
-  '\t\t\t\t\tswitchBtn(s.autoExpand, "生成时自动展开 Think", "stream-think-auto-expand",',
-  '\t\t\t\t\t\t() => updateThinkSettings({ autoExpand: !s.autoExpand }))),',
-  '\t\t\t\trow("autoCollapse", "单段推理结束后收起 Think",',
-  '\t\t\t\t\t!s.autoExpand',
-  '\t\t\t\t\t\t? "自动展开已关闭；推理中手动展开的会在这段结束后收起"',
-  '\t\t\t\t\t\t: s.autoCollapse',
-  '\t\t\t\t\t\t\t? "该条 Think 结束后收起，不控制外层过程组（默认）"',
-  '\t\t\t\t\t\t\t: "已关闭：Think 内层保持展开；整轮结束后可从过程组查看",',
-  '\t\t\t\t\tswitchBtn(s.autoCollapse, "单段推理结束后收起 Think", "stream-think-auto-collapse",',
-  '\t\t\t\t\t\t() => updateThinkSettings({ autoCollapse: !s.autoCollapse }))),',
+  '\t\t\t\t/* 展开/收起已交回官方（官方 Think 行默认收起、点开才展开），两个开关一并移除。 */',
   '\t\t\t\trow("controlScroll", "跟随动画（已停用）",',
   '\t\t\t\t\t"跟随已整条交回官方：本插件不再操作会话滚动。开关保留但当前没有任何效果。",',
   '\t\t\t\tswitchBtn(s.controlScroll, "平滑跟随动画（已停用）", "stream-think-control-scroll",',
@@ -1554,7 +1541,7 @@ function patchClient(source) {
 
   // 原生过程计时不是流式正文：绕开逐字器，单独给每秒变化的数字做过渡。
   out = swap(out, 'client/turn-process-clock-insert', '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {', TURN_PROCESS_CLOCK + '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {')
-  out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : wrapFollowNodeView(key === "command" ? wrapBtwCommandNodeView(inner) : inner, useControlScroll);')
+  out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : inner;')
   out = swap(
     out,
     'client/mark-edited-files',
@@ -1778,6 +1765,55 @@ function patchClient(source) {
   out = swap(out, 'client/think-summary-map-removed', ['', '\t\t\t"thinkSummary": "I17U7q_thinkSummary",'].join('\n'), '')
   out = swap(out, 'client/think-separator-map-removed', ['', '\t\t\t"thinkSeparator": "I17U7q_thinkSeparator",'].join('\n'), '')
   out = swap(out, 'client/think-sweep-map-removed', ['', '\t\t\t"dsh-smooth-stream-think-sweep": "I17U7q_dsh-smooth-stream-think-sweep",'].join('\n'), '')
+
+  /* ── Think 行交回官方（不再有自动展开，也没有插件那套摘录）─────────────────
+   * 用户拍板「Think 自动展开去掉、摘录恢复官方」：删掉 assistant-step 的 -100 注册，
+   * 官方 ReasoningRow 因此回归（默认收起、运行中/结算后自带一行摘录、点开才看全文）。
+   * wrapAgentChatRows 必须留下 —— 它同时负责把摘要座位包到 turn-process 节点上。 */
+  out = swap(
+    out,
+    'client/assistant-step-takeover-removed',
+    [
+      '\t\t\tctx.slots.inject("conversation.chat.node", () => {',
+      '\t\t\t\tlet releaseTakeover;',
+      '\t\t\t\tconst syncTakeover = () => {',
+      '\t\t\t\t\tif (!settings.takeoverEnabled()) {',
+      '\t\t\t\t\t\treleaseTakeover?.();',
+      '\t\t\t\t\t\treleaseTakeover = void 0;',
+      '\t\t\t\t\t\treturn;',
+      '\t\t\t\t\t}',
+      '\t\t\t\t\tif (releaseTakeover !== void 0) return;',
+      '\t\t\t\t\tconst unwrap = wrapAgentChatRows(ctx, useControlScroll);',
+      '\t\t\t\t\tconst unshadow = ctx.slots.register({',
+      '\t\t\t\t\t\tname: "conversation.chat.node",',
+      '\t\t\t\t\t\tkey: "assistant-step",',
+      '\t\t\t\t\t\tpriority: -100,',
+      '\t\t\t\t\t\tlocale: "conversation",',
+      '\t\t\t\t\t\tregistrant: "dsh-smooth-stream"',
+      '\t\t\t\t\t}, configured);',
+      '\t\t\t\t\treleaseTakeover = () => {',
+      '\t\t\t\t\t\tunwrap();',
+      '\t\t\t\t\t\tunshadow();',
+      '\t\t\t\t\t};',
+      '\t\t\t\t};',
+      '\t\t\t\tconst unsubscribe = settings.subscribe(syncTakeover);',
+      '\t\t\t\tsyncTakeover();',
+      '\t\t\t\treturn () => {',
+      '\t\t\t\t\tunsubscribe();',
+      '\t\t\t\t\treleaseTakeover?.();',
+      '\t\t\t\t};',
+      '\t\t\t});',
+    ].join('\n'),
+    [
+      '\t\t\t/* Think 行的展开与摘录已交回官方；这里只保留 turn-process 的摘要座位包装。 */',
+      '\t\t\tctx.slots.inject("conversation.chat.node", () => {',
+      '\t\t\t\tconst unwrap = wrapAgentChatRows(ctx, useControlScroll);',
+      '\t\t\t\treturn () => {',
+      '\t\t\t\t\tunwrap();',
+      '\t\t\t\t};',
+      '\t\t\t});',
+    ].join('\n'),
+  )
 
   // 用户明确不要「收起态 Think 摘录」：整个 collapsedContent 置空，收起时只剩图标 + 标题 + 展开箭头。
   // summary / summaryRef / thinkSummary 的 CSS 都保留（不再渲染即无影响），单点改动以免上游升级时锚点漂移。

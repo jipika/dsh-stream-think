@@ -245,8 +245,8 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
   } else {
     bad('关闭跟随', 'Element.prototype 的滚动方法被改写')
   }
-  if (clockEntry.component.name === 'ProcessHighlightsView' && toolEntry.component.name === 'TypewriterFollowNodeView') {
-    ok('过程行保留摘要包装（计时数字接管已于 2026-10-07 撤销），工具行保留流式包装')
+  if (clockEntry.component.name === 'ProcessHighlightsView' && toolEntry.component.name !== 'TypewriterFollowNodeView') {
+    ok('过程行保留摘要包装；工具行已交回官方（不再包一层）')
   } else {
     bad('过程行包装', `${clockEntry.component.name} / ${toolEntry.component.name}`)
   }
@@ -283,12 +283,10 @@ if (exportsObj !== null && typeof exportsObj.apply === 'function') {
       return null
     }
     const click = (id) => findTestId(settingsPanelComponent(), id)?.props?.onClick?.()
-    click('stream-think-auto-expand')
-    click('stream-think-auto-collapse')
-    click('stream-think-control-scroll')
+    click('stream-think-image-settle')
     const saved = JSON.parse(store.get('dsh-stream-think:settings.v1'))
-    if (saved.autoExpand === false && saved.autoCollapse === false && saved.controlScroll === true) {
-      ok('三项设置点击后立即写入本地设置')
+    if (saved.imageSettle === false) {
+      ok('设置开关点击后立即写入本地设置（展开/收起已交回官方，不再有对应开关）')
     } else bad('设置开关生效', JSON.stringify(saved))
     click('stream-think-show-edited-files')
     click('stream-think-show-thought-summary')
