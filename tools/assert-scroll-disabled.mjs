@@ -165,11 +165,6 @@ for (const [needle, label] of [
 /* ── 7. 关键补丁痕迹（防上游改版后静默退化） ────────────────────────────── */
 const traces = [
   ['if (false) useConversationFollow(', '跟随器调用点被停用'],
-  ['enabled: false, // was: typing && !reduced', '正文逐字器停用'],
-  ['enabled: false, // was: running && !reduced', '思考逐字器停用'],
-  ['useLogarithmicFade(followRootRef, false,', '正文渐隐停用'],
-  ['useLogarithmicFade(fadeRootRef, false,', '思考渐隐停用'],
-  ['/* 滚动交回官方：不再驱动摘录横向滚动。 */', '摘录横向滚动停用'],
   ['/* 原生计时行接管已撤销：不再读按钮标签、不做数字过渡。 */', '计时行标签观察撤销'],
   ['/* 原生计时行接管已撤销：不再计算数字过渡内容。 */', '计时行数字过渡撤销'],
   ['/* clockLabelParts / canAnimateClockChange 已随计时行接管撤销删除。 */', '计时行死函数删除'],

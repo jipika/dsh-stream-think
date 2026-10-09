@@ -2584,6 +2584,17 @@ function patchClient(source) {
   out = removeRegion(out, 'client/settings-api-removed', 'src/settings-api.ts')
   out = removeRegion(out, 'client/settings-api-client-removed', 'src/client/smooth-stream-settings-api.ts')
   // clientStore.ts 暂不能删：createSnapshotStore 还被 debugRuntime.ts 引用（跟随器批一起处理）。
+
+  /* ── 死代码清理（第五批：打字机渲染器主体）────────────────────────────────
+   * assistant-step 交回官方后，TypewriterAssistantNodeView 及其独占的四个模块
+   * （AnimatedDisclosure / useSmoothStreamContent / LogarithmicFade / useFpsGuard）
+   * 都不再被调用。摘要依赖的 isReasoningLive 与 selectThoughtSummary 已在上一批
+   * 改插到插件 region，所以这里可以整段删。 */
+  out = removeRegion(out, 'client/typewriter-assistant-view-removed', 'src/client/TypewriterAssistantNodeView.tsx')
+  out = removeRegion(out, 'client/animated-disclosure-removed', 'src/client/AnimatedDisclosure.tsx')
+  out = removeRegion(out, 'client/smooth-stream-content-removed', 'src/client/useSmoothStreamContent.ts')
+  out = removeRegion(out, 'client/logarithmic-fade-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/LogarithmicFade.module.css.mjs')
+  out = removeRegion(out, 'client/fps-guard-removed', 'src/client/useFpsGuard.ts')
   out = removeRegion(out, 'client/locales-removed', 'src/client/locales.ts')
 
   return out

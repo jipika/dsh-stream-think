@@ -365,7 +365,7 @@ if (clockGone.length > 0) {
   const thoughtSelectorEnd = clientSource.indexOf('function processHighlights(', thoughtSelectorStart)
   if (thoughtSelectorStart < 0 || thoughtSelectorEnd < 0) bad('思考摘要选择函数提取', '产物里找不到摘要选择函数')
   else vm.runInContext(clientSource.slice(thoughtSelectorStart, thoughtSelectorEnd), sandbox)
-  vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function AnimatedReasoning({')), sandbox)
+  vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function processHighlights(')), sandbox)
   const { editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
     clientSource.slice(clockStart, clockEnd) + '\n; ({ editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot })', sandbox)
   const result = (name, argsRaw, isError = false) => ({ kind: 'tool-result', callId: name, isError, call: { name, argsRaw }, subCalls: [] })
@@ -831,7 +831,7 @@ if (padStart < 0 || padEnd < 0 || sessionFollowStart < 0 || sessionFollowEnd < 0
 const queueStart = clientSource.indexOf('const QUEUE_ACCEL_EXPONENT = 1.25;')
 const queueEnd = clientSource.indexOf('/** Counts user-perceived characters', queueStart)
 if (queueStart < 0 || queueEnd < 0) {
-  bad('高速流式队列提取', '找不到自适应显示函数')
+  ok('自适应显示函数已随打字机渲染器移除（流式逐字整条不再存在）')
 } else {
   const defaultMaxRevealCps = Number(clientSource.match(/maxRevealCps: (\d+),/)?.[1])
   const { computeAdaptiveQueueStep } = vm.runInNewContext(
@@ -857,7 +857,7 @@ if (queueStart < 0 || queueEnd < 0) {
 const reasoningStart = clientSource.indexOf('function AnimatedReasoning({')
 const reasoningEnd = clientSource.indexOf('function TypewriterAssistantNodeView(', reasoningStart)
 if (reasoningStart < 0 || reasoningEnd < 0) {
-  bad('Think 行摘录移除', '找不到 AnimatedReasoning 区间')
+  ok('AnimatedReasoning 已随打字机渲染器移除（Think 行摘录交回官方自带）')
 } else {
   const reasoningBody = clientSource.slice(reasoningStart, reasoningEnd)
   const collapsed = reasoningBody.match(/collapsedContent: ([^,\n]+),/)
@@ -872,7 +872,7 @@ if (reasoningStart < 0 || reasoningEnd < 0) {
 const foldStart = clientSource.indexOf('function FoldableReasoning({')
 const foldEnd = clientSource.indexOf('function firstLine(', foldStart)
 if (foldStart < 0 || foldEnd < 0) {
-  bad('折叠过渡组件提取', '找不到 FoldableReasoning')
+  ok('FoldableReasoning 已随打字机渲染器移除')
 } else {
   const makeFold = () => {
     let visibleState
