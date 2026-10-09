@@ -1712,6 +1712,74 @@ function patchClient(source) {
   )
   out = swap(out, 'client/animate-auto-collapse', 'bodyTransition: !autoClosed,', 'bodyTransition: !reduced,')
 
+  /* ── 用户要求「去掉影响外观的东西」：接管外壳与 Think 行不再另立一套度量，全部改回官方同源 ──
+   * 官方基准（DSH 仓库 packages/client/ui-chat/src/client/chat/AssistantMarkdown.module.css
+   * 与 packages/client/ui-primitives/src/DisclosureRow.module.css、chat/ReasoningRow.module.css）：
+   *   .root  → font-size: var(--dsh-content-font-size, 14px) / line-height: calc(24px + var(--dsh-content-font-delta, 0px))
+   *   .row   → height: calc(24px + delta)、color: tertiary、:hover 变 secondary
+   *   .leading 16px 盒 + svg 14px，都随 delta 缩放；.title 用 secondary 字号档
+   *   .thinkBody → padding: 4px 0 4px calc(22px + delta)，不设字号（继承 root）
+   * 摘要分组（.dsh-stream-think-highlights / .dsh-stream-think-clock）是插件自己的元素，一律不动。 */
+  out = swap(
+    out,
+    'client/think-root-typography-official',
+    '.I17U7q_root{min-width:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:16px;line-height:28px;display:flex}',
+    '.I17U7q_root{min-width:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:var(--dsh-content-font-size,14px);line-height:calc(24px + var(--dsh-content-font-delta,0px));display:flex}',
+  )
+  out = swap(
+    out,
+    'client/think-row-metrics-official',
+    '.I17U7q_disclosureRow{cursor:pointer;align-items:center;min-width:0;height:24px;display:flex;position:relative;overflow:hidden}',
+    '.I17U7q_disclosureRow{cursor:pointer;align-items:center;min-width:0;height:calc(24px + var(--dsh-content-font-delta,0px));color:var(--dsw-alias-label-tertiary);transition:color .1s ease;display:flex;position:relative;overflow:hidden}.I17U7q_disclosureRow:hover{color:var(--dsw-alias-label-secondary)}',
+  )
+  out = swap(
+    out,
+    'client/think-leading-metrics-official',
+    '.I17U7q_disclosureLeading{width:16px;height:16px;color:var(--dsw-alias-label-tertiary);flex:none;justify-content:center;align-items:center;margin-right:6px;display:inline-flex;position:relative}',
+    '.I17U7q_disclosureLeading{width:calc(16px + var(--dsh-content-font-delta,0px));height:calc(16px + var(--dsh-content-font-delta,0px));color:inherit;flex:none;justify-content:center;align-items:center;margin-right:6px;display:inline-flex;position:relative}.I17U7q_disclosureLeading svg:not([data-state]){width:calc(14px + var(--dsh-content-font-delta,0px));height:calc(14px + var(--dsh-content-font-delta,0px))}',
+  )
+  out = swap(
+    out,
+    'client/think-title-typography-official',
+    '.I17U7q_disclosureTitle{color:var(--dsw-alias-label-secondary);flex:none;font-size:14px;line-height:24px}',
+    '.I17U7q_disclosureTitle{color:inherit;flex:none;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px))}',
+  )
+  out = swap(
+    out,
+    'client/think-body-metrics-official',
+    '.I17U7q_thinkBody{color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;word-break:break-word;padding:4px 0 4px 22px;font-size:14px;line-height:24px}',
+    '.I17U7q_thinkBody{color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;word-break:break-word;padding:4px 0 4px calc(22px + var(--dsh-content-font-delta,0px));min-width:0}',
+  )
+  // 摘录已不渲染（见 client/think-summary-removed），连同扫描光斑一起删掉死样式。
+  out = swap(
+    out,
+    'client/think-summary-css-removed',
+    '.I17U7q_thinkSummary{min-width:0;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:auto;font-size:14px;line-height:24px;overflow:hidden}.I17U7q_thinkSummary[data-follow-end]{text-overflow:clip}',
+    '',
+  )
+  out = swap(
+    out,
+    'client/think-separator-css-removed',
+    '.I17U7q_thinkSeparator{background:var(--dsw-alias-label-caption);border-radius:1px;flex:none;width:2px;height:2px;margin:0 8px}',
+    '',
+  )
+  out = swap(
+    out,
+    'client/think-sweep-removed',
+    '.I17U7q_think[data-state=running] .I17U7q_thinkRow:after{content:\\"\\";inset-block:0;background:linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--dsw-alias-bg-base) 60%, transparent) 55%, transparent 100%);pointer-events:none;width:300px;animation:2.6s ease-out infinite I17U7q_dsh-smooth-stream-think-sweep;position:absolute;left:0}@keyframes I17U7q_dsh-smooth-stream-think-sweep{0%{left:-300px}90%,to{left:100%}}',
+    '',
+  )
+  out = swap(
+    out,
+    'client/think-stopped-radius-official',
+    'border-radius:6px;align-self:flex-start;padding:0 6px;font-size:11px;line-height:18px}',
+    'border-radius:var(--dsw-radius-sm);align-self:flex-start;padding:0 6px;font-size:11px;line-height:18px}',
+  )
+  // 规则删掉后，CSS module 的导出映射里还留着三条永不使用的条目（thinkRow 仍在用，不能删）。
+  out = swap(out, 'client/think-summary-map-removed', ['', '\t\t\t"thinkSummary": "I17U7q_thinkSummary",'].join('\n'), '')
+  out = swap(out, 'client/think-separator-map-removed', ['', '\t\t\t"thinkSeparator": "I17U7q_thinkSeparator",'].join('\n'), '')
+  out = swap(out, 'client/think-sweep-map-removed', ['', '\t\t\t"dsh-smooth-stream-think-sweep": "I17U7q_dsh-smooth-stream-think-sweep",'].join('\n'), '')
+
   // 用户明确不要「收起态 Think 摘录」：整个 collapsedContent 置空，收起时只剩图标 + 标题 + 展开箭头。
   // summary / summaryRef / thinkSummary 的 CSS 都保留（不再渲染即无影响），单点改动以免上游升级时锚点漂移。
   out = swap(
