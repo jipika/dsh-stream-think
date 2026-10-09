@@ -895,8 +895,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 			".dsh-stream-think-highlights button:hover{color:var(--dsw-alias-label-primary)}",
 			".dsh-stream-think-highlights button:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px;border-radius:2px}",
 			"@media (prefers-reduced-motion:reduce){.dsh-stream-think-highlight-body,.dsh-stream-think-highlight-list,.dsh-stream-think-highlight-chevron{transition:none}}",
-			// DSH 0.2 把 Think、正文和下一段工具过程拆成不同 flow 行；统一相邻视觉间距。
-			".I17U7q_body:has([data-variant=think]){gap:8px}",
+			// 用户要求「不改变任何官方外观」：这条把正文块间距从官方 16px 压到 8px，删除。
 			"[data-step-process] button[data-process-activity].dsh-stream-think-process-title{position:relative;min-width:0;max-width:100%;overflow:visible}",
 			".dsh-stream-think-process-title .dsh-stream-think-process-native{position:absolute;opacity:0;pointer-events:none}",
 			".dsh-stream-think-process-viewport{display:block;position:relative;flex:0 1 auto;min-width:0;height:1lh;overflow:hidden;pointer-events:none}",
