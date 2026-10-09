@@ -1766,6 +1766,20 @@ function patchClient(source) {
   out = swap(out, 'client/think-separator-map-removed', ['', '\t\t\t"thinkSeparator": "I17U7q_thinkSeparator",'].join('\n'), '')
   out = swap(out, 'client/think-sweep-map-removed', ['', '\t\t\t"dsh-smooth-stream-think-sweep": "I17U7q_dsh-smooth-stream-think-sweep",'].join('\n'), '')
 
+  /* ── 死代码清理（第一批：整段无外部引用的 region）────────────────────────────
+   * 判定手法：把 region 内每个顶层符号在「region 之外」搜一遍，全为 0 才整段删；
+   * 同时删掉锚点落在该 region 里、随宿主一起消失的旧补丁。
+   *   · useProgressiveDomText.ts：外部引用只有 TypewriterToolNodeView region 里的
+   *     useProgressiveDomText(hostRef, …)（它自己的补丁改的就是这行）。 */
+  out = removeRegion(out, 'client/progressive-dom-text-removed', 'src/client/useProgressiveDomText.ts')
+  /* TypewriterToolNodeView.tsx（6 个顶层符号：openAgentLocation / isGrowingChatNode /
+   * isFollowableChatNode / shouldAnimateChatNodeEntrance / liveAgentTailMode / wrapFollowNodeView，
+   * region 外引用全为 0）与只被它引用的 AgentRowEntrance CSS。随宿主消失的 5 条旧补丁
+   * （scroll-entrance / scroll-runtime-handoff / reveal-disabled-dom / scroll-growth-pulse /
+   * entrance-attr）已在上面的补丁表里改成注释。 */
+  out = removeRegion(out, 'client/tool-node-view-removed', 'src/client/TypewriterToolNodeView.tsx')
+  out = removeRegion(out, 'client/agent-row-entrance-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/AgentRowEntrance.module.css.mjs')
+
   /* ── Think 行交回官方（不再有自动展开，也没有插件那套摘录）─────────────────
    * 用户拍板「Think 自动展开去掉、摘录恢复官方」：删掉 assistant-step 的 -100 注册，
    * 官方 ReasoningRow 因此回归（默认收起、运行中/结算后自带一行摘录、点开才看全文）。
@@ -2010,7 +2024,7 @@ function patchClient(source) {
     '\t\tfunction readerScrolledUp(port) {\n\t\t\treturn port.scrollTop < (followScrollLedgers.get(port) ?? 0) - 8;\n\t\t}',
     '\t\tfunction readerScrolledUp(port) {\n\t\t\tconst floor = Math.max(0, port.scrollHeight - port.clientHeight);\n\t\t\tconst previousTop = Math.min(followScrollLedgers.get(port) ?? 0, floor);\n\t\t\treturn port.scrollTop < previousTop - 8;\n\t\t}')
   out = swap(out, 'client/resume-growth-state', '\t\t\t\tlet primed = false;', '\t\t\t\tlet primed = false;\n\t\t\t\tlet waitingForContentGrowth = false;\n\t\t\t\tlet resumedContentHeight = 0;')
-  out = swap(out, 'client/resume-no-history-text-replay', '\t\t\t\tvisit(root, revealInitial);', '\t\t\t\tvisit(root, revealInitial && !isFollowSessionEntryRow(root));')
+  // 宿主（useProgressiveDomText.ts）已在死代码清理中整段移除，这条补丁随之删除。
   out = swap(out, 'client/resume-no-synthetic-reserve',
     '\t\t\t\t\t\t\treservePx = Math.max(ownedBottomSpaceOf(nextPort), predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);',
     '\t\t\t\t\t\t\twaitingForContentGrowth = !entrancePending;\n\t\t\t\t\t\t\treservePx = Math.max(ownedBottomSpaceOf(nextPort), !waitingForContentGrowth && predictGrowth && (hasStatus || speedCpsRef.current > 90) ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx) : 0);')
@@ -2122,36 +2136,22 @@ function patchClient(source) {
     ].join('\n'),
   )
   // ② 入场动画是跟随器的副产物（entrance 只用于 glide 首屏高度），一并停掉
-  out = swap(
-    out,
-    'client/scroll-entrance-disabled',
-    '\t\t\treturn isFollowableChatNode(node);',
-    '\t\t\t/* dsh-stream-think：入场 glide 由跟随器驱动，已随滚动停用。 */\n\t\t\treturn false; // was: isFollowableChatNode(node)',
-  )
+  // 宿主（TypewriterToolNodeView.tsx）已整段移除：入场判定随跟随器一起消失。
   // ③ 运行时接力（未知/终态行的 handoff）同样只喂入场动画
-  out = swap(
-    out,
-    'client/scroll-runtime-handoff-disabled',
-    '\t\t\t\t\truntimePersistentRef.current = mode === "turn";\n\t\t\t\t\tsetRuntimeFollowable(true);\n\t\t\t\t\tsetEntering(true);',
-    [
-      '\t\t\t\t\t/* dsh-stream-think：运行时接力只为跟随器重新入场，已停用。 */',
-      '\t\t\t\t\truntimePersistentRef.current = mode === "turn";',
-      '\t\t\t\t\truntimeHandledRef.current = true;',
-    ].join('\n'),
-  )
+  // 宿主（TypewriterToolNodeView.tsx）已整段移除：运行时接力代码随之消失。
   // ④ DSH 0.2 的逐字器：正文每帧增长会把官方跟随逼成离散步进，随「滚动交回」一起关掉
   //    （useSmoothStreamContent 的 enabled=false 分支走 syncImmediate，content 一变即整段落盘）
   out = swap(out, 'client/reveal-disabled-markdown', '\t\t\t\tenabled: typing && !reduced,', '\t\t\t\tenabled: false, // was: typing && !reduced（滚动交回官方：正文整段出）')
   out = swap(out, 'client/reveal-disabled-think', '\t\t\t\tenabled: running && !reduced,', '\t\t\t\tenabled: false, // was: running && !reduced（同上）')
   //    注意锚点只覆盖到第二个实参，行内注释必须用 /* */ —— `//` 会把后面的实参一起注释掉
-  out = swap(out, 'client/reveal-disabled-dom', '\t\t\tuseProgressiveDomText(hostRef, followable,', '\t\t\tuseProgressiveDomText(hostRef, false, /* was: followable */')
+  // 宿主（TypewriterToolNodeView.tsx）已整段移除：逐字器调用随宿主消失。
   // ⑤ 对数渐隐是逐字器的高光副产物，没有逐字就没有它
   out = swap(out, 'client/log-fade-disabled-markdown', '\t\t\tuseLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef);', '\t\t\tuseLogarithmicFade(followRootRef, false, live, speedCpsRef); // 滚动交回官方：不逐字 → 不渐隐')
   out = swap(out, 'client/log-fade-disabled-think', '\t\t\tuseLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, running, fadeSpeedRef);', '\t\t\tuseLogarithmicFade(fadeRootRef, false, running, fadeSpeedRef); // 同上')
   // ⑥ FollowHost 的 onGrowth 脉冲只为跟随器再武装一次 glide → 交给 wrapped 组件时不传
-  out = swap(out, 'client/scroll-growth-pulse-disabled', '\t\t\t\t\tonGrowth: followable ? onGrowth : void 0,', '\t\t\t\t\tonGrowth: void 0, // 滚动交回官方：不触发跟随脉冲')
+  // 宿主（TypewriterToolNodeView.tsx）已整段移除：onGrowth 脉冲参数随宿主消失。
   // ⑦ entrance 属性只服务那条 glide 动画（[data-entrance=active]），不再被点亮
-  out = swap(out, 'client/entrance-attr-disabled', '\t\t\t\t\tentranceActive: entering || growthPulse,', '\t\t\t\t\tentranceActive: false, // 滚动交回官方：入场动画随跟随器停用')
+  // 宿主（TypewriterToolNodeView.tsx）已整段移除：entrance 属性随宿主消失。
   // ⑧ 思考摘录自实现的横向滚动（推理中把摘录拖到尾部）也去掉，交给原生渲染
   out = swap(out, 'client/summary-scrollleft-disabled', '\t\t\t\telement.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0;', '\t\t\t\t/* 滚动交回官方：不再驱动摘录横向滚动。 */')
 

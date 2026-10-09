@@ -152,31 +152,23 @@ if (reachable.length === 0) {
   }
 }
 
-/* ── 6. 逐字器早退：isFollowSessionEntryRow 等后续语句不会执行 ───────────── */
-{
-  const d = byName.get('useProgressiveDomText')
-  const head = lines.slice(d.start, d.start + 12)
-  const earlyIdx = head.findIndex((l) => l.includes('if (!enabled && records === void 0) return;'))
-  if (earlyIdx < 0) bad('useProgressiveDomText: 找不到 disabled 早退')
-  else {
-    const lateIdx = lines.slice(d.start, d.end).findIndex((l) => l.includes('isFollowSessionEntryRow('))
-    if (lateIdx > earlyIdx) ok(`useProgressiveDomText 在 enabled=false 时于第 ${d.start + earlyIdx + 1} 行早退，第 ${d.start + lateIdx + 1} 行的 isFollowSessionEntryRow 不可达`)
-    else bad('useProgressiveDomText: isFollowSessionEntryRow 出现在早退之前')
-  }
+/* ── 6. 死代码清理后：逐字器与工具行包装器已从产物整段消失 ───────────────── */
+for (const [needle, label] of [
+  ['function useProgressiveDomText(', 'useProgressiveDomText 函数'],
+  ['function wrapFollowNodeView(', 'wrapFollowNodeView 函数'],
+  ['isFollowableChatNode(', 'isFollowableChatNode 调用'],
+]) {
+  if (!src.includes(needle)) ok(`${label}已从产物移除`)
+  else bad(`${label}仍出现在产物里（死代码清理未生效）`)
 }
 
 /* ── 7. 关键补丁痕迹（防上游改版后静默退化） ────────────────────────────── */
 const traces = [
   ['if (false) useConversationFollow(', '跟随器调用点被停用'],
-  ['return false; // was: isFollowableChatNode(node)', '入场动画停用'],
-  ['runtimeHandledRef.current = true;\n\t\t\t\t}', '运行时接力停用'],
   ['enabled: false, // was: typing && !reduced', '正文逐字器停用'],
   ['enabled: false, // was: running && !reduced', '思考逐字器停用'],
-  ['useProgressiveDomText(hostRef, false,', '工具行逐字器停用'],
   ['useLogarithmicFade(followRootRef, false,', '正文渐隐停用'],
   ['useLogarithmicFade(fadeRootRef, false,', '思考渐隐停用'],
-  ['onGrowth: void 0,', '跟随脉冲停用'],
-  ['entranceActive: false,', '入场属性停用'],
   ['/* 滚动交回官方：不再驱动摘录横向滚动。 */', '摘录横向滚动停用'],
   ['/* 原生计时行接管已撤销：不再读按钮标签、不做数字过渡。 */', '计时行标签观察撤销'],
   ['/* 原生计时行接管已撤销：不再计算数字过渡内容。 */', '计时行数字过渡撤销'],
