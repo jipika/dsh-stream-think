@@ -1541,7 +1541,7 @@ function patchClient(source) {
 
   // 原生过程计时不是流式正文：绕开逐字器，单独给每秒变化的数字做过渡。
   out = swap(out, 'client/turn-process-clock-insert', '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {', TURN_PROCESS_CLOCK + '\t\tfunction wrapAgentChatRows(ctx, useControlScroll) {')
-  out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : inner;')
+  out = swap(out, 'client/turn-process-clock-wrapper', 'const next = wrapFollowNodeView(inner, useControlScroll);', 'const next = key === "turn-process" ? wrapTurnProcessClockNodeView(inner) : key === "command" ? wrapBtwCommandNodeView(inner) : inner;')
   out = swap(
     out,
     'client/mark-edited-files',
