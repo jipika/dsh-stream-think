@@ -362,7 +362,7 @@ if (clockGone.length > 0) {
 } else {
   ok('计时数字接管已撤销（clockLabelParts / canAnimateClockChange / presentProcessTitle 均已删除）')
   const thoughtSelectorStart = clientSource.indexOf('function selectThoughtSummary(text) {')
-  const thoughtSelectorEnd = clientSource.indexOf('function AnimatedReasoning({', thoughtSelectorStart)
+  const thoughtSelectorEnd = clientSource.indexOf('function processHighlights(', thoughtSelectorStart)
   if (thoughtSelectorStart < 0 || thoughtSelectorEnd < 0) bad('思考摘要选择函数提取', '产物里找不到摘要选择函数')
   else vm.runInContext(clientSource.slice(thoughtSelectorStart, thoughtSelectorEnd), sandbox)
   vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function AnimatedReasoning({')), sandbox)
@@ -715,7 +715,7 @@ else {
 }
 
 const helpersStart = clientSource.indexOf('function findLiveReasoningIndex(blocks) {')
-const helpersEnd = clientSource.indexOf('function AnimatedReasoning({', helpersStart)
+const helpersEnd = clientSource.indexOf('function processHighlights(', helpersStart)
 if (helpersStart < 0 || helpersEnd < 0) {
   bad('思考判定函数提取', '产物里找不到判定函数')
 } else {
@@ -756,7 +756,7 @@ if (helpersStart < 0 || helpersEnd < 0) {
 
 /* Think 摘录选句规则：八类摘要的「思考摘录」类目依赖它（行内翻页组件已移除）。 */
 const summaryStart = clientSource.indexOf('function selectThoughtSummary(text) {')
-const summaryEnd = clientSource.indexOf('function AnimatedReasoning({', summaryStart)
+const summaryEnd = clientSource.indexOf('function processHighlights(', summaryStart)
 if (summaryStart < 0 || summaryEnd < 0) {
   bad('Think 摘要选句函数提取', '找不到选句函数')
 } else {

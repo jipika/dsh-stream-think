@@ -1565,7 +1565,7 @@ function patchClient(source) {
   )
 
   // 修复 1：reasoning 的 running 判定
-  out = swap(out, 'client/isReasoningLive-insert', '\t\tfunction AnimatedReasoning({', IS_REASONING_LIVE + '\t\tfunction AnimatedReasoning({')
+  out = swap(out, 'client/isReasoningLive-insert', '\t\tfunction processHighlights(', IS_REASONING_LIVE + '\t\tfunction processHighlights(')
   out = swap(out, 'client/reasoning-running', 'running: streaming && index === last,', 'running: streaming && isReasoningLive(data.blocks, index),')
   out = swap(
     out,
@@ -1905,7 +1905,7 @@ function patchClient(source) {
   )
 
   // 八类摘要里的「思考摘录」类目依赖这个选句函数（行内摘录组件已移除）。
-  out = swap(out, 'client/thought-summary-picker-insert', '\t\tfunction AnimatedReasoning({', THOUGHT_SUMMARY_PICKER + '\t\tfunction AnimatedReasoning({')
+  out = swap(out, 'client/thought-summary-picker-insert', '\t\tfunction processHighlights(', THOUGHT_SUMMARY_PICKER + '\t\tfunction processHighlights(')
 
   // 组件签名与调用点补上新 props
   out = swap(
