@@ -1021,7 +1021,9 @@ const TURN_PROCESS_CLOCK = String.raw`
 						}
 						/* read 家族里目录与网页不给可点路径（官方 list_dir 走 others、web_fetch 的 url 不是文件）：只留真实文件读取。 */
 						const target = kind === "read" && !["list_dir", "list_directory", "web_fetch"].includes(name) ? readTargetFields(args) : null;
-						actions.push({ id: String(block.callId ?? ""), kind, title, failed: block.isError === true, text: (block.isError ? "失败 · " : "") + text, ...target !== null ? target : {}, ...!block.isError && todos !== null ? { todos } : {} });
+						/* advisor（第二模型复核）：把这次复核的正文带上，供摘要里点击展开。 */
+						const reviewText = kind === "advisor" && Array.isArray(block.content) ? block.content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim() : "";
+						actions.push({ id: String(block.callId ?? ""), kind, title, failed: block.isError === true, text: (block.isError ? "失败 · " : "") + text, ...target !== null ? target : {}, ...!block.isError && todos !== null ? { todos } : {}, ...reviewText !== "" ? { content: reviewText } : {} });
 					}
 				}
 				if (Array.isArray(block.subCalls)) for (const child of block.subCalls) visit(child, depth + 1);
@@ -1136,7 +1138,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 				const failed = action.failed && action.text.startsWith("失败 · ");
 				const detail = failed ? action.text.slice(5) : action.text;
 				const labeled = ["other", "goal", "advisor"].includes(action.kind) ? (failed ? "失败 · " : "") + action.title + (detail === action.title ? "" : " · " + detail) : action.text;
-				return { type: action.kind === "task" && Array.isArray(action.todos) ? "task" : "action", text: labeled, action };
+				return { type: action.kind === "advisor" ? "advisor" : action.kind === "task" && Array.isArray(action.todos) ? "task" : "action", text: labeled, action, ...action.kind === "advisor" && typeof action.content === "string" ? { content: action.content } : {} };
 			});
 			const add = (key, title, items, preview) => {
 				if (items.length > 0) groups.push({ key, title, preview: briefProcessText(preview), items });
@@ -1237,6 +1239,7 @@ const TURN_PROCESS_CLOCK = String.raw`
 				const [openGroups, setOpenGroups] = (0, react.useState)({});
 				const [visitedGroups, setVisitedGroups] = (0, react.useState)({});
 				const [openThought, setOpenThought] = (0, react.useState)(null);
+				const [openAdvisor, setOpenAdvisor] = (0, react.useState)(null);
 				const detailSettings = (0, react.useSyncExternalStore)(subscribeThinkSettings, getThinkSettings, getThinkSettings);
 				const detailsEnabled = detailSettings.showTaskUpdates || detailSettings.showGoals || detailSettings.showEditedFiles || detailSettings.showThoughtSummary || detailSettings.showCommands || detailSettings.showReads || detailSettings.showSearches || detailSettings.showOtherTools;
 				(0, react.useLayoutEffect)(() => {
@@ -1318,6 +1321,13 @@ const TURN_PROCESS_CLOCK = String.raw`
 									(0, react.createElement)("div", { className: "dsh-stream-think-highlight-list", "aria-hidden": !open },
 										...(mounted ? group.items : []).map((item, index) => {
 											const key = item.type + ":" + index;
+											if (item.type === "advisor") {
+												const advisorOpen = openAdvisor === index;
+												const advisorId = bodyId + "-advisor-" + index;
+												return (0, react.createElement)("div", { key, className: "dsh-stream-think-highlight-entry" },
+													(0, react.createElement)("button", { type: "button", className: "dsh-stream-think-highlight-item", "data-type": "advisor", tabIndex: open ? 0 : -1, "aria-expanded": advisorOpen, "aria-controls": advisorOpen ? advisorId : void 0, onClick: () => setOpenAdvisor((old) => old === index ? null : index) }, item.text),
+													advisorOpen && (0, react.createElement)("div", { id: advisorId, className: "dsh-stream-think-highlight-thought" }, item.content ?? "（这次复核没有留下可显示的正文）"));
+											}
 											if (item.type === "thought") {
 												const expanded = openThought === index;
 												const detailId = bodyId + "-thought-" + index;
