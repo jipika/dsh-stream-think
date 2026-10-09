@@ -96,15 +96,11 @@ const converge = () => {
 }
 converge()
 
-/* ── 4. 守卫豁免：内部写点被「本插件自有状态」把关的记账函数 ───────────────
- * 这些函数本身可能被非停用区调用（例如会话记账），但函数体一进门就检查
- * 「本插件是否拥有这个 port」，而该状态的写者全在停用区内 → 永远进不去。 */
-const GUARDED = {
-  releaseFollowSession: {
-    guard: 'if (followSessionOwners.has(port)) {',
-    stateVar: 'followSessionOwners',
-  },
-}
+/* ── 4. 守卫豁免清单（2026-10-09 已清空）─────────────────────────────────────
+ * 原先只有一个成员 releaseFollowSession（跟随器的会话记账函数）。跟随器
+ * （useConversationFollow / FollowHost / teleprompterGlide）已整段移除，
+ * 会话滚动完全交回官方，这里不再需要豁免条目。 */
+const GUARDED = {}
 const guardedOk = new Set()
 for (const [name, spec] of Object.entries(GUARDED)) {
   const d = byName.get(name)
@@ -164,7 +160,6 @@ for (const [needle, label] of [
 
 /* ── 7. 关键补丁痕迹（防上游改版后静默退化） ────────────────────────────── */
 const traces = [
-  ['if (false) useConversationFollow(', '跟随器调用点被停用'],
   ['/* 原生计时行接管已撤销：不再读按钮标签、不做数字过渡。 */', '计时行标签观察撤销'],
   ['/* 原生计时行接管已撤销：不再计算数字过渡内容。 */', '计时行数字过渡撤销'],
   ['/* clockLabelParts / canAnimateClockChange 已随计时行接管撤销删除。 */', '计时行死函数删除'],

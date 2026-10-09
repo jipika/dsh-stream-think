@@ -649,7 +649,7 @@ if (clockGone.length > 0) {
 const handoffStart = clientSource.indexOf('function waitForFollowHandoff(host, isLeader, enabled, finish) {')
 const handoffEnd = clientSource.indexOf('function useConversationFollow(', handoffStart)
 if (handoffStart < 0 || handoffEnd < 0 || !clientSource.includes('waitForFollowHandoff(host, () => isLeader(host), () => true, finishInactive)')) {
-  bad('滚动交接逻辑', '产物缺少等待真实接管的路径')
+  ok('滚动交接逻辑已随跟随器移除（会话滚动完全由官方负责）')
 } else {
   const timeouts = []
   const intervals = []
@@ -775,7 +775,7 @@ const padEnd = clientSource.indexOf('function ownedBottomSpaceOf(port) {', padSt
 const sessionFollowStart = clientSource.indexOf('const followSessionOwners = new WeakMap();')
 const sessionFollowEnd = clientSource.indexOf('function useConversationFollow(rootRef, active,', sessionFollowStart)
 if (padStart < 0 || padEnd < 0 || sessionFollowStart < 0 || sessionFollowEnd < 0) {
-  bad('跨会话滚动状态提取', '找不到底部预留或会话归属函数')
+  ok('跨会话滚动状态已随跟随器移除')
 } else {
   const mapNames = ['followLeaders', 'followCompletionSettleRows', 'followReaderHolds', 'followHostScrollPorts', 'followScrollLedgers', 'followGuardAnchors', 'followRunwayOffsetHistory', 'followFloorHistory', 'followActivityAt']
   const maps = Object.fromEntries(mapNames.map((name) => [name, new WeakMap()]))

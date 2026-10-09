@@ -2595,6 +2595,21 @@ function patchClient(source) {
   out = removeRegion(out, 'client/smooth-stream-content-removed', 'src/client/useSmoothStreamContent.ts')
   out = removeRegion(out, 'client/logarithmic-fade-css-removed', '\\0dsh-css:/Users/dzlin/work/project/dsh-smooth-stream/src/client/LogarithmicFade.module.css.mjs')
   out = removeRegion(out, 'client/fps-guard-removed', 'src/client/useFpsGuard.ts')
+
+  /* ── 死代码清理（第六批：跟随器全家）──────────────────────────────────────
+   * 逐符号核对过（防误伤）：teleprompterGlide.ts 的 93 个顶层符号、FollowHost.tsx、
+   * debugRuntime.ts 的 12 个、clientStore.ts 的 3 个，在四个 region 之外引用全为 0；
+   * 两处可疑同名已排除 —— 插件 region 里的 `store` 是 props.useChat(...) 的局部变量、
+   * `now` 是 Date.now()/performance.now() 方法调用，都不是 debugRuntime 的导出。
+   * 其余配套：`if (false) useConversationFollow(...)` 停用壳在 FollowHost 内；
+   * isFollowSessionEntryRow / hasRecentConversationFollow / notifyFollowCommit 只在
+   * teleprompterGlide 内部；createSnapshotStore 的定义在 clientStore、唯一使用方是
+   * debugRuntime —— 五个 region 一起删才闭环。 */
+  out = removeRegion(out, 'client/teleprompter-glide-removed', 'src/client/teleprompterGlide.ts')
+  out = removeRegion(out, 'client/follow-host-removed', 'src/client/FollowHost.tsx')
+  out = removeRegion(out, 'client/debug-runtime-removed', 'src/client/debugRuntime.ts')
+  // clientStore.ts 到这里才失去唯一使用方（debugRuntime），与它同批删除。
+  out = removeRegion(out, 'client/client-store-removed', 'src/client/clientStore.ts')
   out = removeRegion(out, 'client/locales-removed', 'src/client/locales.ts')
 
   return out
