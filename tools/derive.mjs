@@ -2653,6 +2653,63 @@ const SCHEMA_FALLBACK = [
   '})();',
 ].join('\n')
 
+/**
+ * 0.2.1 兼容：Host 设置服务（`SettingsForms`）不再提供 `register`/`scope`
+ * （仅保留 `describe`/`update`/`replace`/`mutate`）。
+ * 旧宿主仍走原生 `register`；新宿主用「内存 + 状态文件」兜底：`get`/`update`
+ * 签名与旧 scope 一致，下游 RPC（`settings.read`/`settings.write`/`debug.*`）
+ * 零改动；设置页本会话内可读写，跨重启由状态文件恢复。
+ * （条目 `Config` 的 mode/preset 等仍走官方 entry config + boot 全局通道，
+ * 不受影响。）
+ */
+const HOST_SETTINGS_FALLBACK = [
+  '/**',
+  ' * dsh-stream-think: 0.2.1 兼容 —— Host 设置服务不再提供 `register`/`scope`。',
+  ' * 旧宿主走原生 `register`；新宿主用「内存 + 状态文件」兜底，下游 RPC 零改动。',
+  ' */',
+  'function createStreamThinkMemoryScope() {',
+  '\tconst clone = (value) => JSON.parse(JSON.stringify(value));',
+  '\tconst stateFile = (() => {',
+  '\t\ttry {',
+  '\t\t\tconst base = process.env.DSH_HOME || (typeof process.env.HOME === "string" && process.env.HOME !== "" ? join(process.env.HOME, ".dsh") : void 0);',
+  '\t\t\tif (base === void 0) return void 0;',
+  '\t\t\treturn join(base, "state", "dsh-stream-think", "settings.json");',
+  '\t\t} catch {',
+  '\t\t\treturn void 0;',
+  '\t\t}',
+  '\t})();',
+  '\tconst readPersisted = () => {',
+  '\t\tif (stateFile === void 0) return void 0;',
+  '\t\ttry {',
+  '\t\t\treturn JSON.parse(readFileSync(stateFile, "utf8"));',
+  '\t\t} catch {',
+  '\t\t\treturn void 0;',
+  '\t\t}',
+  '\t};',
+  '\tconst writePersisted = (state) => {',
+  '\t\tif (stateFile === void 0) return;',
+  '\t\ttry {',
+  '\t\t\tmkdirSync(dirname(stateFile), { recursive: true });',
+  '\t\t\twriteFileSync(stateFile, JSON.stringify(state, null, 2));',
+  '\t\t} catch (error) {',
+  '\t\t\tconsole.warn(`[dsh-stream-think] 状态文件写入失败（仅本次会话生效）: ${stateFile}`, error);',
+  '\t\t}',
+  '\t};',
+  '\tconst isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);',
+  '\tlet state = clone(DEFAULT_STREAM_SETTINGS);',
+  '\tconst persisted = readPersisted();',
+  '\tif (isRecord(persisted)) state = { ...state, ...persisted };',
+  '\treturn {',
+  '\t\tget: () => clone(state),',
+  '\t\tupdate: async (patch) => {',
+  '\t\t\tif (!isRecord(patch)) throw new Error("dsh-stream-think: settings patch must be an object");',
+  '\t\t\tstate = { ...state, ...clone(patch) };',
+  '\t\t\twritePersisted(state);',
+  '\t\t},',
+  '\t};',
+  '}',
+].join('\n')
+
 function patchHost(source) {
   let out = source
   out = swap(
@@ -2669,6 +2726,12 @@ function patchHost(source) {
   out = swap(out, 'host/high-speed-default', 'maxRevealCps: 600,', 'maxRevealCps: 1800,')
   out = swap(out, 'host/high-speed-schema', 'maxRevealCps: Schema.number().min(120).max(1e3)', 'maxRevealCps: Schema.number().min(120).max(2400)')
   out = swap(out, 'host/high-speed-validation', 'tuning.maxRevealCps <= 1e3', 'tuning.maxRevealCps <= 2400')
+  // 0.2.1 兼容：node:fs 需补 mkdirSync/writeFileSync（状态文件兜底用）。
+  out = swap(out, 'host/fs-state', 'import { readFileSync } from "node:fs";', 'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";')
+  // 0.2.1 兼容：在 apply 之前注入内存 scope 兜底（保证 apply 内可引用）。
+  out = swap(out, 'host/settings-fallback-insert', 'function apply(ctx, config) {', HOST_SETTINGS_FALLBACK + '\nfunction apply(ctx, config) {')
+  // 0.2.1 兼容：特性检测 register，缺失时退到内存 + 状态文件 scope。
+  out = swap(out, 'host/settings-register-fallback', 'const scope = settingsCtx.settings.register(settingsNamespace, StreamSettingsSchema, { applies: "live" });', 'const scope = typeof settingsCtx.settings.register === "function" ? settingsCtx.settings.register(settingsNamespace, StreamSettingsSchema, { applies: "live" }) : createStreamThinkMemoryScope();')
   return out
 }
 

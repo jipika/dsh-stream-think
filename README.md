@@ -423,3 +423,18 @@ Host 半边需要 `@deepseek-ai/schemastery`（宿主提供）。link 安装时�
 派生自 [dsh-smooth-stream](https://github.com/Laplace-bit/dsh-smooth-stream)（MIT）
 与 [dsh-think-ux](https://github.com/el16z3c/dsh-think-ux)（MIT）的思路；本包同为 MIT。
 上游版权归各自作者，本包不是它们的发布渠道。
+
+---
+
+## ☕ 赞赏支持
+
+如果 dsh-stream-think 对你的研究与测试有所帮助，欢迎请作者喝杯咖啡 ☕
+
+<p align="center">
+  <img src="assets/sponsor.jpg" width="260" alt="微信赞赏码" />
+  <img src="assets/afdian_reward.jpg" width="200" alt="爱发电赞助码" />
+</p>
+
+<p align="center">
+  <b>给项目点个 Star ⭐</b> 同样是对开发者最大的鼓励！
+</p>
