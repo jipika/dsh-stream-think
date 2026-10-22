@@ -891,9 +891,20 @@ const TURN_PROCESS_CLOCK = String.raw`
 			".dsh-stream-think-task-label{flex:none;color:var(--dsw-alias-label-caption);font-size:12px;white-space:nowrap}",
 			".dsh-stream-think-task-empty{margin:0;padding:9px 14px;color:var(--dsw-alias-label-caption)}",
 			".dsh-stream-think-highlight-thought{margin:2px 0 8px;padding:8px 10px;border-left:2px solid var(--dsw-alias-border-secondary,currentColor);border-radius:0 6px 6px 0;background:var(--dsw-alias-background-secondary,transparent);white-space:pre-wrap;overflow-wrap:anywhere}",
-			".dsh-stream-think-highlight-item[data-type=file],.dsh-stream-think-highlight-item[data-type=read]{text-decoration:underline dotted;text-underline-offset:3px}",
+			".dsh-stream-think-highlight-item[data-type=read]{text-decoration:underline dotted;text-underline-offset:3px}",
+			/* 编辑行整行是展开开关：下划线只留给文件名本身，统计数字与「打开」保持普通文字。 */
+			".dsh-stream-think-highlight-item[data-type=file]:not(.dsh-stream-think-edit-toggle){text-decoration:underline dotted;text-underline-offset:3px}",
 			".dsh-stream-think-highlights button:hover{color:var(--dsw-alias-label-primary)}",
 			".dsh-stream-think-highlights button:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px;border-radius:2px}",
+			".dsh-stream-think-edit-head{display:flex;align-items:center;gap:6px;min-width:0}",
+			".dsh-stream-think-edit-toggle{display:flex;align-items:center;gap:6px;flex:1;min-width:0}",
+			".dsh-stream-think-edit-path{flex:1;min-width:0;overflow-wrap:anywhere;text-decoration:underline dotted;text-underline-offset:3px}",
+			".dsh-stream-think-edit-stat{flex:none;display:inline-flex;gap:4px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);text-decoration:none}",
+			".dsh-stream-think-edit-added{color:var(--dsw-alias-state-success-primary);text-decoration:none}",
+			".dsh-stream-think-edit-removed{color:var(--dsw-alias-state-error-primary,var(--dsw-alias-label-tertiary));text-decoration:none}",
+			".dsh-stream-think-edit-open{flex:none;padding:0 2px;border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;line-height:20px;text-decoration:none;cursor:pointer}",
+			".dsh-stream-think-edit-open:hover{color:var(--dsw-alias-label-primary);text-decoration:none}",
+			".dsh-stream-think-edit-diff{margin:4px 0 10px;max-width:100%}",
 			"@media (prefers-reduced-motion:reduce){.dsh-stream-think-highlight-body,.dsh-stream-think-highlight-list,.dsh-stream-think-highlight-chevron{transition:none}}",
 			// 用户要求「不改变任何官方外观」：这条把正文块间距从官方 16px 压到 8px，删除。
 			"[data-step-process] button[data-process-activity].dsh-stream-think-process-title{position:relative;min-width:0;max-width:100%;overflow:visible}",
@@ -945,6 +956,78 @@ const TURN_PROCESS_CLOCK = String.raw`
 			}
 			const chars = [...normalized];
 			return chars.length > 100 ? chars.slice(0, 99).join("").trimEnd() + "…" : normalized;
+		}
+		const EDIT_TOOL_NAMES = ["edit", "write", "apply_patch", "str_replace_editor"];
+		const THINK_DIFF_MAX_LINES = 9;
+		const THINK_DIFF_LABELS = {
+			codeLabel: "代码块",
+			wrapLabel: "自动换行",
+			unwrapLabel: "不自动换行",
+			copy: "复制",
+			copied: "复制成功",
+			collapseAria: "收起差异",
+			expandAria: (hidden) => "展开其余 " + hidden + " 行差异",
+			collapse: "收起",
+			expand: (hidden) => "… 其余 " + hidden + " 行"
+		};
+		/* 与官方 diffCardModel 同口径地收窄结果元数据里的 diffs。 */
+		function narrowDiffHunks(diffs) {
+			if (!Array.isArray(diffs) || diffs.length === 0) return [];
+			const out = [];
+			for (const hunk of diffs) {
+				if (hunk === null || typeof hunk !== "object") continue;
+				const { path, oldText, newText } = hunk;
+				if (typeof path !== "string" || path.trim() === "") continue;
+				if (oldText !== null && typeof oldText !== "string") continue;
+				if (typeof newText !== "string") continue;
+				out.push({ path, oldText, newText });
+			}
+			return out;
+		}
+		/* 未结束或旧会话没有 meta.diffs 时，从调用参数派生（官方 FileMutationRow 的同口径兜底）。 */
+		function argumentDiffHunks(name, args) {
+			if (args === null || typeof args !== "object") return [];
+			const raw = typeof args.file_path === "string" && args.file_path.trim() !== "" ? args.file_path : typeof args.path === "string" ? args.path : "";
+			const path = raw.trim();
+			if (path === "") return [];
+			if (name === "write" && typeof args.content === "string") return [{ path, oldText: null, newText: args.content }];
+			if (name === "edit" && typeof args.old_string === "string" && typeof args.new_string === "string") return [{ path, oldText: args.old_string === "" ? null : args.old_string, newText: args.new_string }];
+			if (name === "str_replace_editor") {
+				if (args.command === "create" && (args.file_text === void 0 || typeof args.file_text === "string")) return [{ path, oldText: null, newText: args.file_text ?? "" }];
+				if (args.command === "str_replace") return [{ path, oldText: typeof args.old_str === "string" && args.old_str !== "" ? args.old_str : null, newText: typeof args.new_str === "string" ? args.new_str : "" }];
+			}
+			return [];
+		}
+		/* 编辑摘要要能展开看真实差异：优先用工具结果 meta.diffs（已应用的真实改动），
+		   没有时退回参数派生。同一路径的多次编辑按出现顺序合并。 */
+		function editDiffTargetsFromToolNode(node) {
+			if (node?.kind !== "tool-call") return [];
+			const targets = [];
+			const byPath = new Map();
+			const push = (path, diffs) => {
+				if (diffs.length === 0) return;
+				const existing = byPath.get(path);
+				if (existing !== void 0) { existing.diffs.push(...diffs); return; }
+				const target = { path, diffs: [...diffs] };
+				byPath.set(path, target);
+				targets.push(target);
+			};
+			const visit = (block, depth) => {
+				if (block === null || typeof block !== "object" || depth > 16) return;
+				if (block.kind === "tool-result" && block.isError !== true) {
+					const name = block.call?.name;
+					if (EDIT_TOOL_NAMES.includes(name)) {
+						let args = {};
+						try { args = JSON.parse(block.call?.argsRaw ?? "{}"); } catch { /* Partial arguments: no diff for this call. */ }
+						const applied = narrowDiffHunks(block.meta?.diffs);
+						if (applied.length > 0) for (const diff of applied) push(diff.path, [diff]);
+						else for (const diff of argumentDiffHunks(name, args)) push(diff.path, [diff]);
+					}
+				}
+				if (Array.isArray(block.subCalls)) for (const child of block.subCalls) visit(child, depth + 1);
+			};
+			visit(node.data?.root, 0);
+			return targets;
 		}
 		function editPathsFromToolNode(node) {
 			if (node?.kind !== "tool-call") return [];
@@ -1037,6 +1120,8 @@ const TURN_PROCESS_CLOCK = String.raw`
 		const processThoughtCache = new WeakMap();
 		function toolDataHighlights(records) {
 			const files = new Set();
+			const edits = [];
+			const editsByPath = new Map();
 			const actions = [];
 			const seen = new Set();
 			for (const data of records) {
@@ -1044,17 +1129,25 @@ const TURN_PROCESS_CLOCK = String.raw`
 				let entry = processToolCache.get(data);
 				if (entry === void 0) {
 					const node = { kind: "tool-call", data };
-					entry = { files: editPathsFromToolNode(node), actions: actionSummariesFromToolNode(node) };
+					entry = { files: editPathsFromToolNode(node), actions: actionSummariesFromToolNode(node), edits: editDiffTargetsFromToolNode(node) };
 					processToolCache.set(data, entry);
 				}
 				for (const path of entry.files) files.add(path);
+				for (const edit of entry.edits) {
+					const existing = editsByPath.get(edit.path);
+					if (existing === void 0) {
+						const target = { path: edit.path, diffs: [...edit.diffs] };
+						editsByPath.set(edit.path, target);
+						edits.push(target);
+					} else existing.diffs.push(...edit.diffs);
+				}
 				for (const action of entry.actions) {
 					if (action.id !== "" && seen.has(action.id)) continue;
 					if (action.id !== "") seen.add(action.id);
 					actions.push(action);
 				}
 			}
-			return { files: [...files], actions };
+			return { files: [...files], actions, edits };
 		}
 		function thoughtDataHighlights(records) {
 			const thoughts = [];
@@ -1117,11 +1210,13 @@ const TURN_PROCESS_CLOCK = String.raw`
 					}
 				}
 			}
-			return { files: [...files], thoughts, actions };
+			return { files: [...files], thoughts, actions, edits: [] };
 		}
 		function visibleProcessHighlights(highlights, settings) {
 			return {
 				files: settings.showEditedFiles ? highlights.files : [],
+				/* DOM 兜底路径只有路径没有 diff：显式给空数组，渲染层据此退回「打开文件」。 */
+				edits: settings.showEditedFiles && Array.isArray(highlights.edits) ? highlights.edits : [],
 				thoughts: settings.showThoughtSummary ? highlights.thoughts : [],
 				tasks: settings.showTaskUpdates ? highlights.actions.filter((action) => action.kind === "task") : [],
 				actions: highlights.actions.filter((action) => action.kind === "advisor" ? settings.showAdvisor : action.kind === "edit" ? settings.showEditedFiles : action.kind === "goal" ? settings.showGoals : action.kind === "command" ? settings.showCommands : action.kind === "read" ? settings.showReads : action.kind === "search" ? settings.showSearches : action.kind === "other" && settings.showOtherTools)
@@ -1144,7 +1239,15 @@ const TURN_PROCESS_CLOCK = String.raw`
 				if (items.length > 0) groups.push({ key, title, preview: briefProcessText(preview), items });
 			};
 			const editActions = actionsOf("edit");
-			const files = visible.files.map((path) => ({ type: "file", text: fileLabel(path), path }));
+			const diffsByPath = new Map((visible.edits ?? []).map((edit) => [edit.path, edit.diffs]));
+			/* files 与 edits 的路径来源可能一个是参数、一个是结果元数据：精确命中失败时按路径后缀兜底匹配。 */
+			const diffsFor = (path) => {
+				const exact = diffsByPath.get(path);
+				if (exact !== void 0) return exact;
+				const matched = (visible.edits ?? []).find((edit) => path.endsWith("/" + edit.path) || edit.path.endsWith("/" + path));
+				return matched === void 0 ? [] : matched.diffs;
+			};
+			const files = visible.files.map((path) => ({ type: "file", text: fileLabel(path), path, diffs: diffsFor(path) }));
 			const failedEdits = editActions.filter((action) => action.text.startsWith("失败 · "));
 			const editTitle = files.length > 0 ? "编辑了 " + files.length + " 个文件" + (failedEdits.length > 0 ? " · " + failedEdits.length + " 次失败" : "") : "文件编辑 " + editActions.length + " 次";
 			add("edit", editTitle, files.length > 0 ? [...files, ...actionItems(failedEdits)] : actionItems(editActions), files.length > 0 ? files.slice(-2).map((item) => item.text).join("、") : editActions.at(-1)?.text ?? "");
@@ -1235,11 +1338,12 @@ const TURN_PROCESS_CLOCK = String.raw`
 				const rootRef = (0, react.useRef)(null);
 				const highlightId = (0, react.useId)();
 				const [clock, setClock] = (0, react.useState)({ previous: "", current: "", sequence: 0 });
-				const [highlights, setHighlights] = (0, react.useState)({ files: [], thoughts: [], actions: [] });
+				const [highlights, setHighlights] = (0, react.useState)({ files: [], thoughts: [], actions: [], edits: [] });
 				const [openGroups, setOpenGroups] = (0, react.useState)({});
 				const [visitedGroups, setVisitedGroups] = (0, react.useState)({});
 				const [openThought, setOpenThought] = (0, react.useState)(null);
 				const [openAdvisor, setOpenAdvisor] = (0, react.useState)(null);
+				const [openEdit, setOpenEdit] = (0, react.useState)(null);
 				const detailSettings = (0, react.useSyncExternalStore)(subscribeThinkSettings, getThinkSettings, getThinkSettings);
 				const detailsEnabled = detailSettings.showTaskUpdates || detailSettings.showGoals || detailSettings.showEditedFiles || detailSettings.showThoughtSummary || detailSettings.showCommands || detailSettings.showReads || detailSettings.showSearches || detailSettings.showOtherTools;
 				(0, react.useLayoutEffect)(() => {
@@ -1342,7 +1446,24 @@ const TURN_PROCESS_CLOCK = String.raw`
 													(0, react.createElement)("span", { className: "dsh-stream-think-task-status", role: "img", "aria-label": todo.status === "completed" ? "已完成" : todo.status === "in_progress" ? "进行中" : "待处理" }, todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "▶" : null),
 													(0, react.createElement)("span", { className: "dsh-stream-think-task-content" }, todo.content),
 													(0, react.createElement)("span", { className: "dsh-stream-think-task-label" }, todo.status === "completed" ? "已完成" : todo.status === "in_progress" ? "进行中" : "待处理")))));
-											if (item.type === "file" && typeof props.openFile === "function") return (0, react.createElement)("button", { type: "button", key, className: "dsh-stream-think-highlight-item", "data-type": "file", tabIndex: open ? 0 : -1, title: item.path, onClick: () => props.openFile(item.path) }, item.text);
+											if (item.type === "file") {
+												const fileDiffs = Array.isArray(item.diffs) ? item.diffs : [];
+												const openFile = typeof props.openFile === "function" ? props.openFile : null;
+												if (fileDiffs.length === 0) return (0, react.createElement)("button", { type: "button", key, className: "dsh-stream-think-highlight-item", "data-type": "file", tabIndex: open ? 0 : -1, title: item.path, onClick: () => { if (openFile !== null) openFile(item.path); } }, item.text);
+												const totals = _deepseek_ai_dsh_client_ui_primitives.diffTotals(fileDiffs);
+												const editExpanded = openEdit === index;
+												const diffId = bodyId + "-diff-" + index;
+												return (0, react.createElement)("div", { key, className: "dsh-stream-think-highlight-entry dsh-stream-think-edit" },
+													(0, react.createElement)("div", { className: "dsh-stream-think-edit-head" },
+														(0, react.createElement)("button", { type: "button", className: "dsh-stream-think-highlight-item dsh-stream-think-edit-toggle", "data-type": "file", tabIndex: open ? 0 : -1, "aria-expanded": editExpanded, "aria-controls": editExpanded ? diffId : void 0, title: item.path, onClick: () => setOpenEdit((old) => old === index ? null : index) },
+															(0, react.createElement)("span", { className: "dsh-stream-think-edit-path" }, item.text),
+															(0, react.createElement)("span", { className: "dsh-stream-think-edit-stat" },
+																(0, react.createElement)("span", { className: "dsh-stream-think-edit-added" }, "+" + totals.added),
+																(0, react.createElement)("span", { className: "dsh-stream-think-edit-removed" }, "-" + totals.removed))),
+														openFile === null ? null : (0, react.createElement)("button", { type: "button", className: "dsh-stream-think-edit-open", tabIndex: open ? 0 : -1, title: "打开 " + item.path, onClick: () => openFile(item.path) }, "打开")),
+													editExpanded && (0, react.createElement)("div", { id: diffId, className: "dsh-stream-think-edit-diff" },
+														(0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.DiffBlock, { diffs: fileDiffs, labels: THINK_DIFF_LABELS, maxLines: THINK_DIFF_MAX_LINES })));
+											}
 											/* 读取/查看类条目保持官方工具行的点击能力：带路径就渲染成按钮，openFile(path[, {line}]) 打开侧边栏预览。 */
 											if (item.type === "action" && typeof item.action?.path === "string" && item.action.path !== "" && typeof props.openFile === "function") return (0, react.createElement)("button", { type: "button", key, className: "dsh-stream-think-highlight-item", "data-type": "read", tabIndex: open ? 0 : -1, title: item.action.path, onClick: () => typeof item.action.line === "number" ? props.openFile(item.action.path, { line: item.action.line }) : props.openFile(item.action.path) }, item.text);
 											return (0, react.createElement)("div", { key, className: "dsh-stream-think-highlight-text", "data-type": item.type, title: item.text }, item.text);

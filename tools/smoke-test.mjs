@@ -352,7 +352,7 @@ try {
 
 // 计时数字接管撤销后，clockLabelParts/canAnimateClockChange/presentProcessTitle 都不再存在；
 // 这段改为从摘要工具的起点切到过程行包装函数，验证摘要函数仍然可用。
-const clockStart = clientSource.indexOf('function editPathsFromToolNode(node) {')
+const clockStart = clientSource.indexOf('const EDIT_TOOL_NAMES = [')
 const clockEnd = clientSource.indexOf('function wrapTurnProcessClockNodeView(', clockStart)
 const clockGone = ['function clockLabelParts(', 'function canAnimateClockChange(', 'function presentProcessTitle('].filter((n) => clientSource.includes(n))
 if (clockGone.length > 0) {
@@ -366,8 +366,8 @@ if (clockGone.length > 0) {
   if (thoughtSelectorStart < 0 || thoughtSelectorEnd < 0) bad('思考摘要选择函数提取', '产物里找不到摘要选择函数')
   else vm.runInContext(clientSource.slice(thoughtSelectorStart, thoughtSelectorEnd), sandbox)
   vm.runInContext(clientSource.slice(clientSource.indexOf('function findLiveReasoningIndex(blocks) {'), clientSource.indexOf('function processHighlights(')), sandbox)
-  const { editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
-    clientSource.slice(clockStart, clockEnd) + '\n; ({ editPathsFromToolNode, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot })', sandbox)
+  const { editPathsFromToolNode, editDiffTargetsFromToolNode, narrowDiffHunks, argumentDiffHunks, THINK_DIFF_LABELS, THINK_DIFF_MAX_LINES, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot } = vm.runInContext(
+    clientSource.slice(clockStart, clockEnd) + '\n; ({ editPathsFromToolNode, editDiffTargetsFromToolNode, narrowDiffHunks, argumentDiffHunks, actionSummariesFromToolNode, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, THINK_DIFF_LABELS, THINK_DIFF_MAX_LINES })', sandbox)
   const result = (name, argsRaw, isError = false) => ({ kind: 'tool-result', callId: name, isError, call: { name, argsRaw }, subCalls: [] })
   const toolNode = (root) => ({ kind: 'tool-call', data: { root } })
   const edits = [
@@ -519,6 +519,30 @@ if (clockGone.length > 0) {
   const failedEditGroup = buildProcessHighlightGroups({ files: ['/work/a.ts'], thoughts: [], tasks: [], actions: [{ id: 'failed-edit', kind: 'edit', title: '编辑', text: '失败 · b.ts' }] }, (path) => path.slice('/work/'.length))[0]
   if (failedEditGroup.title.includes('1 次失败') && failedEditGroup.items.length === 2 && failedEditGroup.items[1].text === '失败 · b.ts') ok('同轮成功编辑和失败编辑都能看到')
   else bad('编辑失败记录', JSON.stringify(failedEditGroup))
+  const editWithMeta = result('edit', JSON.stringify({ file_path: '/work/a.ts', old_string: 'old', new_string: 'new' }))
+  editWithMeta.meta = { diffs: [{ path: '/work/a.ts', oldText: 'old', newText: 'new' }] }
+  const metaTargets = editDiffTargetsFromToolNode(toolNode(editWithMeta))
+  const derivedTargets = editDiffTargetsFromToolNode(toolNode(result('edit', JSON.stringify({ file_path: '/work/b.ts', old_string: 'x', new_string: 'y' }))))
+  const writeTargets = editDiffTargetsFromToolNode(toolNode(result('write', JSON.stringify({ file_path: '/work/c.ts', content: 'hello' }))))
+  const failedTargets = editDiffTargetsFromToolNode(toolNode(result('edit', JSON.stringify({ file_path: '/work/d.ts', old_string: 'x', new_string: 'y' }), true)))
+  const junkTargets = editDiffTargetsFromToolNode(toolNode({ ...result('edit', JSON.stringify({ file_path: '/work/e.ts', old_string: 'x', new_string: 'y' })), meta: { diffs: [{ path: 1, oldText: 2, newText: 3 }] } }))
+  if (metaTargets.length === 1 && metaTargets[0].path === '/work/a.ts' && metaTargets[0].diffs[0].oldText === 'old'
+    && derivedTargets.length === 1 && derivedTargets[0].diffs[0].newText === 'y'
+    && writeTargets.length === 1 && writeTargets[0].diffs[0].oldText === null && writeTargets[0].diffs[0].newText === 'hello'
+    && failedTargets.length === 0 && junkTargets.length === 1 && junkTargets[0].diffs[0].newText === 'y') ok('编辑摘要带 diff：meta.diffs 优先，缺失按参数派生，失败编辑无 diff，坏元数据回退')
+  else bad('编辑 diff 提取', JSON.stringify({ metaTargets, derivedTargets, writeTargets, failedTargets, junkTargets }))
+  const twice = toolDataHighlights([
+    { root: { ...result('edit', JSON.stringify({ file_path: '/work/a.ts', old_string: '1', new_string: '2' })), callId: 'edit-1' } },
+    { root: { ...result('edit', JSON.stringify({ file_path: '/work/a.ts', old_string: '2', new_string: '3' })), callId: 'edit-2' } },
+  ])
+  if (twice.files.length === 1 && twice.edits.length === 1 && twice.edits[0].diffs.length === 2 && twice.edits[0].diffs[1].newText === '3') ok('同文件多次编辑合并成一条 diff 序列，不重复计数')
+  else bad('同文件多次编辑', JSON.stringify({ files: twice.files, edits: twice.edits }))
+  const diffVisible = visibleProcessHighlights({ files: ['/work/a.ts'], edits: [{ path: '/work/a.ts', diffs: [{ path: '/work/a.ts', oldText: '1', newText: '2' }] }], thoughts: [], actions: [] }, { ...allOff, showEditedFiles: true })
+  const diffGroup = buildProcessHighlightGroups(diffVisible, (path) => path.slice('/work/'.length))[0]
+  const domVisible = visibleProcessHighlights({ files: ['/work/a.ts'], thoughts: [], actions: [] }, { ...allOff, showEditedFiles: true })
+  const domGroup = buildProcessHighlightGroups(domVisible, (path) => path.slice('/work/'.length))[0]
+  if (diffGroup.items[0].diffs.length === 1 && diffGroup.items[0].text === 'a.ts' && domGroup.items[0].diffs.length === 0) ok('编辑分组的文件条目携带 diff；关闭或 DOM 兜底时退回纯路径')
+  else bad('编辑分组 diff 绑定', JSON.stringify({ diff: diffGroup?.items?.[0], dom: domGroup?.items?.[0] }))
   const wrapperEnd = clientSource.indexOf('\t\t//#endregion', clockEnd)
   const hookSlots = []
   let hookCursor = 0
@@ -548,7 +572,7 @@ if (clockGone.length > 0) {
   }
   const wrapTurnProcessClockNodeView = vm.runInNewContext(
     clientSource.slice(clockEnd, wrapperEnd) + '\n; wrapTurnProcessClockNodeView',
-    { react: fakeReact, getThinkSettings: () => selectedSettings, subscribeThinkSettings() {}, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, MutationObserver: HighlightObserver, requestAnimationFrame: (callback) => { pendingFrames.push(callback); return pendingFrames.length }, cancelAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {} },
+    { react: fakeReact, getThinkSettings: () => selectedSettings, subscribeThinkSettings() {}, toolDataHighlights, thoughtDataHighlights, EMPTY_PROCESS_SOURCE, processHighlights, visibleProcessHighlights, buildProcessHighlightGroups, shouldShowProcessHighlights, sameTaskSnapshot, THINK_DIFF_LABELS, THINK_DIFF_MAX_LINES, _deepseek_ai_dsh_client_ui_primitives: { DiffBlock: (props) => ({ type: 'DiffBlock', props }), diffTotals: () => ({ added: 1, removed: 1 }) }, MutationObserver: HighlightObserver, requestAnimationFrame: (callback) => { pendingFrames.push(callback); return pendingFrames.length }, cancelAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {} },
   )
   const TurnProcess = wrapTurnProcessClockNodeView(() => null)
   const props = { node: { data: { turn: 7 }, location: { turn: { status: 'closed' } } }, turnProcess: { open: false } }
@@ -639,6 +663,33 @@ if (clockGone.length > 0) {
   const nativeUpdated = renderPinned(nativeProps)
   if (findKind(nativeUpdated, 'thought') && findAllClass(findKind(nativeUpdated, 'task'), 'dsh-stream-think-task-item')[0]?.props?.['data-status'] === 'completed') ok('原生数据结算后思考和最新任务状态即时更新')
   else bad('原生数据状态刷新', '仍显示运行中思考或旧任务状态')
+  hookSlots.length = 0
+  selectedSettings = { ...allOff, showEditedFiles: true }
+  const editSnapshot = [{ root: { ...result('edit', JSON.stringify({ file_path: '/work/a.ts', old_string: 'old', new_string: 'new' })), callId: 'native-edit' } }]
+  const editStore = { turnDataSource: (_turn, kind) => ({ subscribe: () => () => {}, getSnapshot: () => kind === 'tool-call' ? editSnapshot : [] }) }
+  const openedEditFiles = []
+  const editProps = { ...liveProps, openFile: (path) => { openedEditFiles.push(path) }, useChat: (select) => select({ nodes: editStore }) }
+  const editFirst = findKind(renderPinned(editProps), 'edit')
+  findClass(editFirst, 'dsh-stream-think-highlight-header')?.props?.onClick()
+  const editOpened = findKind(renderPinned(editProps), 'edit')
+  const editToggle = findClass(editOpened, 'dsh-stream-think-highlight-item dsh-stream-think-edit-toggle')
+  const editStat = findClass(editOpened, 'dsh-stream-think-edit-stat')
+  editToggle?.props?.onClick()
+  const editExpanded = findKind(renderPinned(editProps), 'edit')
+  const diffBlock = findClass(editExpanded, 'dsh-stream-think-edit-diff')
+  const renderedDiff = diffBlock?.children?.[0]
+  if (editToggle?.props?.['aria-expanded'] === false && editStat?.children?.[0]?.children?.[0] === '+1' && editStat?.children?.[1]?.children?.[0] === '-1'
+    && renderedDiff?.props?.diffs?.length === 1 && renderedDiff?.props?.labels?.copy === '复制' && renderedDiff?.props?.maxLines === 9) ok('编辑分组的文件条目默认收起，点开后用官方 DiffBlock 显示该次编辑的差异')
+  else bad('编辑条目 diff 渲染', `toggle=${editToggle?.props?.['aria-expanded']} stat=${JSON.stringify(editStat?.children?.map((part) => part?.children?.[0]))} diff=${JSON.stringify(renderedDiff?.props?.diffs)}`)
+  const editPath = findClass(editExpanded, 'dsh-stream-think-edit-path')
+  const editOpen = findClass(editExpanded, 'dsh-stream-think-edit-open')
+  editOpen?.props?.onClick()
+  if (editPath && editOpen && openedEditFiles[0] === '/work/a.ts' && !clientSource.includes('dsh-stream-think-edit-chevron')
+    && clientSource.includes('.dsh-stream-think-edit-path{flex:1;min-width:0;overflow-wrap:anywhere;text-decoration:underline dotted')
+    && clientSource.includes('.dsh-stream-think-highlight-item[data-type=file]:not(.dsh-stream-think-edit-toggle){text-decoration:underline dotted')
+    && clientSource.includes('.dsh-stream-think-edit-open{flex:none;padding:0 2px;border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;line-height:20px;text-decoration:none')
+    && !clientSource.includes('text-decoration:underline;text-underline-offset:3px}}')) ok('编辑行没有箭头，下划线只落在文件名上（统计与「打开」无下划线）')
+  else bad('编辑行下划线范围', `path=${!!editPath} open=${!!editOpen} chevron=${clientSource.includes('dsh-stream-think-edit-chevron')}`)
   const duplicateData = { root: { ...result('read_file', JSON.stringify({ path: '/work/a.ts' })), callId: 'shared-call' } }
   if (toolDataHighlights([duplicateData, duplicateData]).actions.length === 1 && thoughtDataHighlights([{ status: 'running', blocks: [{ kind: 'reasoning', text: '先核对已经修改的文件。' }, { kind: 'reasoning', text: '现在继续检查其它内容。' }] }]).length === 1) ok('原生分类合并重复调用，运行中只收录已结束思考')
   else bad('原生数据去重与思考状态', '出现重复或半截思考')
