@@ -746,6 +746,255 @@ const IMAGE_SETTLE = String.raw`
 		//#endregion
 
 `;
+/** 原生折叠展开动画：对话流里所有 DisclosureRow 共用一套高度 + 淡入。
+ * 为什么放在插件里而不是改原生：原生 DisclosureRow 是条件渲染
+ *（收起直接卸载、[data-open] 根下没有过渡容器），纯 CSS 做不了收起动画；
+ *展开方向可以在挂载瞬间用 WAAPI 补一帧高度 + 透明 + 位移，和上游
+ * AnimatedDisclosure 的 grid 1fr 观感对齐（.2s 级、ease-out、可打断）。
+ * 只做直接子内容的新增（用户点开展示的那一下）；会话切换整树挂载、
+ * 流式正文逐字、插件自己的 disclosureContent/highlight 一律跳过。
+ */
+const NATIVE_DISCLOSURE_EXPAND = String.raw`
+		//#region dsh-stream-think: 原生折叠展开动画
+		const NATIVE_DISCLOSURE_STYLE_ID = "dsh-stream-think-native-disclosure";
+		/** 诊断计数：展开一次 +1。DevTools 里读它即可确认当前页面跑的是这一版代码。 */
+		let nativeExpandCount = 0;
+		function ensureNativeDisclosureStyle() {
+			if (typeof document === "undefined" || !document.head) return;
+			let el = document.getElementById(NATIVE_DISCLOSURE_STYLE_ID);
+			if (el === null) {
+				el = document.createElement("style");
+				el.id = NATIVE_DISCLOSURE_STYLE_ID;
+				document.head.appendChild(el);
+			}
+			const css = "";
+			if (el.textContent !== css) el.textContent = css;
+		}
+		function installNativeDisclosureExpand() {
+			if (typeof document === "undefined" || typeof MutationObserver === "undefined") return () => {};
+			ensureNativeDisclosureStyle();
+			const reducedQuery = typeof matchMedia !== "undefined" ? matchMedia("(prefers-reduced-motion: reduce)") : null;
+			const EASING = "cubic-bezier(.2,.9,.25,1)";
+			const anims = new WeakMap();
+			const mark = (payload) => {
+				try { window.__DSH_STREAM_THINK_NATIVE_EXPAND__ = payload; } catch (error) {}
+			};
+			mark({ version: 5, count: nativeExpandCount, reduced: reducedQuery !== null && reducedQuery.matches });
+			function isPluginOwn(el) {
+				try {
+					return !!el.closest("[data-disclosure-content],[data-collapsed],.dsh-stream-think-highlight-body");
+				} catch (error) { return false; }
+			}
+			function isDisclosureContent(node) {
+				if (!(node instanceof HTMLElement)) return false;
+				if (isPluginOwn(node)) return false;
+				const parent = node.parentElement;
+				if (parent === null || !parent.hasAttribute("data-open")) return false;
+				let header = null;
+				try { header = parent.querySelector(":scope > [data-disclosure-header]"); } catch (error) { return false; }
+				if (header === null) return false;
+				try {
+					if (!(header.compareDocumentPosition(node) & 4)) return false;
+				} catch (error) { return false; }
+				return true;
+			}
+			function animateEnter(el) {
+				let h = 0;
+				try { h = el.getBoundingClientRect().height; } catch (error) { return; }
+				if (h <= 2) return;
+				/* 减少动效模式不取消动画，只缩短并去掉位移：切到「静的淡入 + 轻撑开」，
+				   这样即使系统开了「减弱动态效果」，也仍然看得出折叠在展开。 */
+				const reduced = reducedQuery !== null && reducedQuery.matches;
+				try { const prev = anims.get(el); if (prev) prev.cancel(); } catch (error) {}
+				const prevOverflow = el.style.overflow;
+				const prevWillChange = el.style.willChange;
+				el.style.overflow = "hidden";
+				el.style.willChange = reduced ? "height,opacity" : "height,opacity,transform";
+				const duration = reduced ? 200 : Math.round(280 + Math.min(h, 1200) * 0.2);
+				const frames = reduced
+					? [{ height: "0px", opacity: "0" }, { height: h + "px", opacity: "1" }]
+					: [
+						{ offset: 0, height: "0px", opacity: "0", transform: "translateY(-12px)" },
+						{ offset: 0.55, opacity: "1", transform: "translateY(0)" },
+						{ offset: 1, height: h + "px", opacity: "1", transform: "translateY(0)" },
+					];
+				let anim = null;
+				try {
+					anim = el.animate(frames, { duration, easing: reduced ? "ease-out" : EASING });
+				} catch (error) {
+					el.style.overflow = prevOverflow;
+					el.style.willChange = prevWillChange;
+					return;
+				}
+				nativeExpandCount += 1;
+				mark({
+					version: 5, count: nativeExpandCount, reduced,
+					last: { className: String(el.className || "").slice(0, 80), height: Math.round(h), duration },
+				});
+				anims.set(el, anim);
+				const cleanup = () => {
+					if (anims.get(el) !== anim) return;
+					anims.delete(el);
+					el.style.overflow = prevOverflow;
+					el.style.willChange = prevWillChange;
+				};
+				anim.onfinish = cleanup;
+				anim.oncancel = cleanup;
+			}
+			function queueEnter(el) {
+				let done = false;
+				const run = () => {
+					if (done) return;
+					done = true;
+					if (!el.isConnected) return;
+					animateEnter(el);
+				};
+				try { requestAnimationFrame(() => requestAnimationFrame(run)); } catch (error) { run(); }
+				setTimeout(run, 50);
+			}
+			const observer = new MutationObserver((mutations) => {
+				for (const mutation of mutations) {
+					/* 过程组这类折叠靠 hidden 属性开合（内容一直在 DOM 里），
+					   不会产生 addedNodes，必须单独接一条件。 */
+					if (mutation.type === "attributes") {
+						const target = mutation.target;
+						if (target instanceof HTMLElement && !target.hasAttribute("hidden") && isFoldBody(target)) queueEnter(target);
+						continue;
+					}
+					for (const node of mutation.addedNodes) {
+						if (!(node instanceof HTMLElement)) continue;
+						if (isDisclosureContent(node)) queueEnter(node);
+					}
+				}
+			});
+			observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+			/* 只有「过程组 / 分组」这类才有资格走 hidden 这条动画，
+			   避免把任意元素上的 hidden 切换都卷进来。 */
+			function isFoldBody(el) {
+				try {
+					if (el.closest("[data-step-process],[data-chat-group-part],[data-turn-process]") === null) return false;
+					return el.getBoundingClientRect().height > 4;
+				} catch (error) { return false; }
+			}
+			/* 收起方向：原生在收起时直接把内容卸载，DOM 层面没有任何可动画的机会。
+			   这里在捕获阶段先拦下这次点击，把内容按当前高度收回去，动画结束后再放行
+			   真正的 toggle（React 的 onClick 照常收到一次 click）。只拦「行」上的鼠标点击，
+			   键盘与程序化开合不掺和。 */
+			const collapseInflight = new WeakMap();
+			const collapsePassOnce = new WeakSet();
+			const restoreCollapse = (state) => {
+				state.content.style.overflow = state.overflow;
+				state.content.style.willChange = state.willChange;
+			};
+			/* 统一的「收回去」动画：高度 h → 0 + 淡出，结束/兜底后恢复行内样式。 */
+			function animateOut(el, h) {
+				const prevOverflow = el.style.overflow;
+				const prevWillChange = el.style.willChange;
+				el.style.overflow = "hidden";
+				el.style.willChange = "height,opacity";
+				const duration = Math.round(170 + Math.min(h, 900) * 0.1);
+				let anim = null;
+				try {
+					anim = el.animate([
+						{ height: h + "px", opacity: "1" },
+						{ height: "0px", opacity: "0" },
+					], { duration, easing: "cubic-bezier(.4,0,.85,.45)" });
+				} catch (error) {
+					el.style.overflow = prevOverflow;
+					el.style.willChange = prevWillChange;
+					return null;
+				}
+				return {
+					anim,
+					duration,
+					restore: () => { el.style.overflow = prevOverflow; el.style.willChange = prevWillChange; },
+				};
+			}
+			const onRowClick = (event) => {
+				const target = event.target;
+				if (!(target instanceof Element)) return;
+
+				/* ① 过程组：头部 button 带 aria-controls，指向高度归零的 body。 */
+				const groupBtn = target.closest("button[aria-controls]");
+				if (groupBtn !== null && groupBtn.closest("[data-process-activity],[data-step-process]") !== null) {
+					const bodyId = groupBtn.getAttribute("aria-controls");
+					const bodyEl = bodyId === null ? null : document.getElementById(bodyId);
+					if (bodyEl !== null && !collapsePassOnce.has(bodyEl)) {
+						const gh = bodyEl.getBoundingClientRect().height;
+						const out = gh > 4 ? animateOut(bodyEl, gh) : null;
+						if (out !== null) {
+							event.preventDefault();
+							event.stopPropagation();
+							let done = false;
+							const finish = () => {
+								if (done) return;
+								done = true;
+								out.restore();
+								collapsePassOnce.add(bodyEl);
+								try { groupBtn.click(); } catch (error) { collapsePassOnce.delete(bodyEl); }
+							};
+							out.anim.onfinish = finish;
+							setTimeout(finish, out.duration + 160);
+							nativeExpandCount += 1;
+							mark({ version: 5, count: nativeExpandCount, reduced: false, collapse: "group",
+								last: { className: String(bodyEl.className || "").slice(0, 80), height: Math.round(gh), duration: out.duration } });
+							return;
+						}
+					} else if (bodyEl !== null) {
+						collapsePassOnce.delete(bodyEl);
+					}
+				}
+
+				/* ② 原生折叠行：整行可点，或点的是行内那颗图标按钮。 */
+				const row = target.closest("[data-disclosure-row]");
+				if (row === null) return;
+				if (collapsePassOnce.has(row)) { collapsePassOnce.delete(row); return; }
+				/* 真实行上 role=button 才是「整行可点」的标记（data-expandable 只有部分调用方给）；点行内图标按钮也算。 */
+				const rowExpands = row.getAttribute("role") === "button" || row.hasAttribute("data-expandable");
+				if (!rowExpands && target.closest("button") === null) return;
+				const root = row.parentElement === null ? null : row.parentElement.parentElement;
+				if (root === null || !root.hasAttribute("data-open")) return;
+				const content = root.lastElementChild;
+				if (content === null || content === root.firstElementChild) return;
+				if (content.hasAttribute("data-disclosure-header")) return;
+				const running = collapseInflight.get(row);
+				if (running !== undefined) {
+					try { running.anim.cancel(); } catch (error) {}
+					running.restore();
+					collapseInflight.delete(row);
+					return;
+				}
+				const h = content.getBoundingClientRect().height;
+				if (h <= 2) return;
+				const out = animateOut(content, h);
+				if (out === null) return;
+				event.preventDefault();
+				event.stopPropagation();
+				collapseInflight.set(row, out);
+				nativeExpandCount += 1;
+				mark({ version: 5, count: nativeExpandCount, reduced: false, collapse: true,
+					last: { className: String(content.className || "").slice(0, 80), height: Math.round(h), duration: out.duration } });
+				let finished = false;
+				const finish = () => {
+					if (finished || collapseInflight.get(row) !== out) return;
+					finished = true;
+					collapseInflight.delete(row);
+					out.restore();
+					collapsePassOnce.add(row);
+					try { row.click(); } catch (error) { collapsePassOnce.delete(row); }
+				};
+				out.anim.onfinish = finish;
+				setTimeout(finish, out.duration + 160);
+			};
+			document.addEventListener("click", onRowClick, true);
+			return () => {
+				observer.disconnect();
+				document.removeEventListener("click", onRowClick, true);
+			};
+		}
+		//#endregion
+
+`;
 const FOLLOW_SESSION_ISOLATION = String.raw`
 		const followSessionOwners = new WeakMap();
 		const followSessionActivations = new WeakMap();
@@ -862,6 +1111,13 @@ const TURN_PROCESS_CLOCK = String.raw`
 			".dsh-stream-think-clock:has(button[data-turn-process]) > .dsh-stream-think-highlights{padding-top:4px}",
 			"[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-highlights) + [data-step-process]:not([hidden]){margin-top:4px!important}",
 			"[data-chat-flow-kind=turn-process]:has(.dsh-stream-think-highlights) + [data-step-process] + [data-chat-running]{--dsh-chat-flow-gap:4px}",
+			/* 过程行之间统一 4px：reasoning 行自己吃掉 ChatView 的邻居规则（正文段之后
+			   12px、turn-process 之后 16px），否则连续两条思考之间凭空多出约 12px。
+			   margin-top 的 var() 在元素自身上解析，声明在 reasoning 行本体即可，
+			   不会顺着继承影响到别的行。 */
+			'[data-chat-group-part="reasoning"]{--dsh-chat-flow-gap:4px!important}',
+			/* 高度已塌成 0 的空正文行，不再把 12px 递给它下面的思考行。 */
+			'[data-chat-group-part="response"]:empty{--dsh-chat-flow-gap:0px!important}',
 			".dsh-stream-think-highlight-group{min-width:0}",
 			".dsh-stream-think-btw{min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}",
 			".dsh-stream-think-btw-question{color:var(--dsw-alias-label-secondary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}",
@@ -1566,6 +1822,21 @@ const THINK_SETTINGS_BLOCK = [
   '\t\tfunction ThinkSettingsPanel() {',
   '\t\t\tconst h = react.createElement;',
   '\t\t\tconst s = (0, react.useSyncExternalStore)(subscribeThinkSettings, getThinkSettings, getThinkSettings);',
+  '\t\t\t/* 折叠动画自检：读原生折叠动画模块写在 window 上的计数。',
+  '\t\t\t   显示「未检测到」= 当前页面跑的是旧 bundle，刷新一次即可。 */',
+  '\t\t\tconst [foldStat, setFoldStat] = (0, react.useState)("");',
+  '\t\t\t(0, react.useEffect)(() => {',
+  '\t\t\t\tconst read = () => {',
+  '\t\t\t\t\tlet stamp = null;',
+  '\t\t\t\t\ttry { stamp = window.__DSH_STREAM_THINK_NATIVE_EXPAND__; } catch (error) { stamp = null; }',
+  '\t\t\t\t\tsetFoldStat(stamp === null || stamp === void 0',
+  '\t\t\t\t\t\t? "未检测到（当前页面是旧 bundle，刷新一次）"',
+  '\t\t\t\t\t\t: "v" + stamp.version + " 已启用 · 已播放 " + stamp.count + " 次");',
+  '\t\t\t\t};',
+  '\t\t\t\tread();',
+  '\t\t\t\tconst timer = setInterval(read, 800);',
+  '\t\t\t\treturn () => clearInterval(timer);',
+  '\t\t\t}, []);',
   '\t\t\tconst switchBtn = (on, label, testId, onToggle) => h("button", {',
   '\t\t\t\ttype: "button", role: "switch",',
   '\t\t\t\t"aria-checked": on ? "true" : "false",',
@@ -1581,6 +1852,7 @@ const THINK_SETTINGS_BLOCK = [
   '\t\t\t\t\th("div", { className: "dsh-stream-think-set-meta" }, meta)),',
   '\t\t\t\tcontrol);',
   '\t\t\treturn h("div", { className: "dsh-stream-think-set" },',
+  '\t\t\t\th("div", { className: "dsh-stream-think-set-desc" }, foldStat),',
   '\t\t\t\th("div", { className: "dsh-stream-think-set-desc" },',
   '\t\t\t\t\t"勾选的类别会直接出现在对话中，各类独立合并，点击标题展开；原生过程组的折叠不影响这些分类。修改立即生效并保存在本机。"),',
   '\t\t\t\t/* 展开/收起已交回官方（官方 Think 行默认收起、点开才展开），两个开关一并移除。 */',
@@ -2599,7 +2871,10 @@ function patchClient(source) {
   )
 
   // 设置块本身的注入点（在 apply 之前，保证 apply 里能引用到）
-  out = swap(out, 'client/settings-block-insert', '\t\tfunction apply(ctx) {', THINK_SETTINGS_BLOCK + IMAGE_PLACEHOLDER + IMAGE_SETTLE + '\t\tfunction apply(ctx) {')
+  out = swap(out, 'client/settings-block-insert', '\t\tfunction apply(ctx) {', THINK_SETTINGS_BLOCK + IMAGE_PLACEHOLDER + IMAGE_SETTLE + NATIVE_DISCLOSURE_EXPAND + '\t\tfunction apply(ctx) {')
+  // 原生折叠展开动画：挂载点与卸载点都锚定在上面已注入的代码上（稳定、自有）。
+  out = swap(out, 'client/native-expand-install', '\t\t\tconst uninstallImagePlaceholder = installImagePlaceholder();', '\t\t\tconst uninstallImagePlaceholder = installImagePlaceholder();\n\t\t\t/* 原生折叠展开动画：对话流里所有 DisclosureRow 共用一套高度 + 淡入。 */\n\t\t\tconst uninstallNativeExpand = installNativeDisclosureExpand();')
+  out = swap(out, 'client/native-expand-cleanup', 'ctx.effect(() => () => { uninstallImagePlaceholder(); uninstallImageSettle(); unwatchImageSettleSessions(); }, "dsh-stream-think: image placeholder + settle");', 'ctx.effect(() => () => { uninstallImagePlaceholder(); uninstallNativeExpand(); uninstallImageSettle(); unwatchImageSettleSessions(); }, "dsh-stream-think: image placeholder + settle");')
   out = swap(
     out,
     'client/all-rows-share-scroll-setting',

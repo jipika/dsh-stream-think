@@ -138,7 +138,14 @@ const IMAGE_SETTLE_FNS = new Set([
   'patchImageSrc', 'prepareImageNode',
   'applyImageBoxPlaceholder', 'scanImageBoxes',
 ])
-const reachable = [...writeFns].filter((n) => !disabled.has(n) && !guardedOk.has(n) && !IMAGE_SETTLE_FNS.has(n))
+// 原生折叠展开动画：用户点开展示那一下的高度 + 淡入，不碰滚动。
+// 它写 overflow/willChange（220ms 内成对恢复）+ WAAPI animate，因此被 WRITE_RE
+// 计入写点，但与"跟随器写 scrollTop"无关——这里单独设闸门证明，第 8b 节逐条核对。
+const NATIVE_EXPAND_FNS = new Set([
+  'installNativeDisclosureExpand',
+  'ensureNativeDisclosureStyle',
+])
+const reachable = [...writeFns].filter((n) => !disabled.has(n) && !guardedOk.has(n) && !IMAGE_SETTLE_FNS.has(n) && !NATIVE_EXPAND_FNS.has(n))
 if (reachable.length === 0) {
   ok(`宿主滚动/几何写入函数 ${writeFns.size} 个：除 image-settle 外全部被停用区（${disabled.size} 个成员）或守卫证明隔离`)
 } else {
@@ -312,6 +319,39 @@ else bad(`摘要被误删: ${missingKeep.join(', ')}`)
   // 设置页必须有对应开关
   if (src.includes('"stream-think-image-settle"')) ok('image-settle 设置页开关已注册')
   else bad('image-settle 设置页开关缺失')
+}
+
+/* ── 8b. 原生折叠展开动画：只做展开那一下，不碰滚动 ───────────────────────
+ * 跟随器停用的约束是"不写宿主滚动"，不是"不动效"。展开动画逐条闸门：
+ *  ① 只在用户展开时触发（MutationObserver 的 addedNodes，且父级已有 data-open
+ *     + header 在前）；会话切换整树挂载、流式逐字都不会命中。
+ *  ② 不写任何滚动属性（scrollTop/scrollLeft/scrollTo/scrollIntoView/
+ *     paddingBottom/minHeight/marginTop）。
+ *  ③ overflow/willChange 成对恢复（先存 prev，finish/cancel 时写回）。
+ *  ④ reduced-motion 直接返回（安装时与每次进入时双检查）。
+ *  ⑤ 插件自己的 disclosureContent/highlight 一律跳过（已有 grid 动画，不叠加）。 */
+{
+  const exp = byName.get('installNativeDisclosureExpand')
+  if (exp === undefined) {
+    bad('native-expand: 产物里找不到 installNativeDisclosureExpand')
+  } else {
+    const body = lines.slice(exp.start, exp.end + 1).join('\n')
+    const gate = [
+      [/parent\.hasAttribute\("data-open"\)/, '只处理已有 data-open 的父级'],
+      [/\[data-disclosure-header\]/, '要求 header 在前（展开内容才算）'],
+      [/\[data-disclosure-content\],\[data-collapsed\]/, '跳过插件自己的 disclosure（不叠加动画）'],
+      [/prefers-reduced-motion/, 'reduced-motion 直接返回'],
+      [/prevOverflow/, 'overflow 成对恢复'],
+      [/prevWillChange/, 'willChange 成对恢复'],
+      [/\.cancel\(\)/, '可打断（取消上一帧动画）'],
+      [/requestAnimationFrame/, '下一帧再量高（等布局提交）'],
+    ].filter(([re]) => !re.test(body)).map(([, label]) => label)
+    if (gate.length === 0) ok('native-expand 闸门：只做展开一下、可打断、成对恢复、reduced-motion 跳过、只有插件自有动画')
+    else bad(`native-expand 闸门缺失: ${gate.join(', ')}`)
+    const scrollWrites = body.split('\n').filter((l) => isCode(l) && /\.scrollTop\s*=|\.scrollLeft\s*=(?!=)|scrollTo\(|scrollIntoView\(|\.paddingBottom\s*=|\.minHeight\s*=|\.marginTop\s*=/.test(l))
+    if (scrollWrites.length === 0) ok('native-expand 不写任何滚动/布局属性（只写 overflow/willChange + WAAPI）')
+    else bad(`native-expand 越界写入: ${scrollWrites.map((l) => l.trim()).join(' | ')}`)
+  }
 }
 
 /* ── 输出 ────────────────────────────────────────────────────────────────── */
